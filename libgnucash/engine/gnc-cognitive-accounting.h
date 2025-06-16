@@ -43,24 +43,117 @@ extern "C" {
 /** AtomSpace handle type for representing accounts as atoms */
 typedef guint64 GncAtomHandle;
 
-/** Account node types in AtomSpace hierarchy */
+/** Account node types in AtomSpace hierarchy - aligned with OpenCog atom types */
 typedef enum {
-    GNC_ATOM_ACCOUNT_CONCEPT,     /**< Basic account concept atom */
-    GNC_ATOM_ACCOUNT_CATEGORY,    /**< Account category/type atom */
-    GNC_ATOM_ACCOUNT_HIERARCHY,   /**< Account hierarchy link */
-    GNC_ATOM_ACCOUNT_BALANCE,     /**< Account balance predicate */
-    GNC_ATOM_TRANSACTION_RULE,    /**< Transaction validation rule */
-    GNC_ATOM_DOUBLE_ENTRY_RULE,   /**< Double-entry constraint */
-    GNC_ATOM_N_ENTRY_RULE         /**< N-entry extension rule */
+    /* Basic node types */
+    GNC_ATOM_CONCEPT_NODE,        /**< ConceptNode - basic account concepts */
+    GNC_ATOM_PREDICATE_NODE,      /**< PredicateNode - balance and validation predicates */
+    GNC_ATOM_SCHEMA_NODE,         /**< SchemaNode - transaction schemas and rules */
+    GNC_ATOM_GROUNDED_SCHEMA,     /**< GroundedSchemaNode - executable accounting procedures */
+    
+    /* Link types for relationships */
+    GNC_ATOM_INHERITANCE_LINK,    /**< InheritanceLink - account type hierarchy */
+    GNC_ATOM_SIMILARITY_LINK,     /**< SimilarityLink - account pattern relationships */
+    GNC_ATOM_MEMBER_LINK,         /**< MemberLink - account membership in categories */
+    GNC_ATOM_EVALUATION_LINK,     /**< EvaluationLink - balance and rule evaluations */
+    GNC_ATOM_EXECUTION_LINK,      /**< ExecutionLink - transaction execution */
+    
+    /* PLN-specific types */
+    GNC_ATOM_IMPLICATION_LINK,    /**< ImplicationLink - ledger rules and constraints */
+    GNC_ATOM_AND_LINK,            /**< AndLink - conjunction of conditions */
+    GNC_ATOM_OR_LINK,             /**< OrLink - disjunction of alternatives */
+    
+    /* MOSES-specific types */
+    GNC_ATOM_COMBO_NODE,          /**< ComboNode - evolved accounting strategies */
+    
+    /* Legacy compatibility */
+    GNC_ATOM_ACCOUNT_CONCEPT = GNC_ATOM_CONCEPT_NODE,
+    GNC_ATOM_ACCOUNT_CATEGORY = GNC_ATOM_CONCEPT_NODE,
+    GNC_ATOM_ACCOUNT_HIERARCHY = GNC_ATOM_INHERITANCE_LINK,
+    GNC_ATOM_ACCOUNT_BALANCE = GNC_ATOM_PREDICATE_NODE,
+    GNC_ATOM_TRANSACTION_RULE = GNC_ATOM_SCHEMA_NODE,
+    GNC_ATOM_DOUBLE_ENTRY_RULE = GNC_ATOM_IMPLICATION_LINK,
+    GNC_ATOM_N_ENTRY_RULE = GNC_ATOM_IMPLICATION_LINK
 } GncAtomType;
 
-/** Cognitive attention allocation parameters */
+/** OpenCog ECAN-style attention allocation parameters */
 typedef struct {
-    gdouble importance;           /**< ECAN importance value */
+    /* Short-term importance (STI) */
+    gdouble sti;                  /**< Short-term importance value */
+    gdouble sti_funds;            /**< Available STI funds for allocation */
+    
+    /* Long-term importance (LTI) */ 
+    gdouble lti;                  /**< Long-term importance value */
+    gdouble lti_funds;            /**< Available LTI funds for allocation */
+    
+    /* Very long-term importance (VLTI) */
+    gdouble vlti;                 /**< Very long-term importance value */
+    
+    /* Confidence and truth values */
     gdouble confidence;           /**< PLN confidence level */
-    gdouble attention_value;      /**< Current attention allocation */
+    gdouble strength;             /**< PLN strength/truth value */
+    
+    /* Activity and wages */
     gdouble activity_level;       /**< Account activity level */
+    gdouble wage;                 /**< Cognitive wage for attention allocation */
+    gdouble rent;                 /**< Cognitive rent for maintaining attention */
+    
+    /* Legacy compatibility */
+    gdouble importance;           /**< Legacy: maps to STI */
+    gdouble attention_value;      /**< Legacy: maps to total attention */
 } GncAttentionParams;
+
+/** @} */
+
+/** @name OpenCog-style AtomSpace Operations */
+/** @{ */
+
+/** Create OpenCog-style ConceptNode for account
+ * @param name Concept name
+ * @return Handle to concept node atom
+ */
+GncAtomHandle gnc_atomspace_create_concept_node(const char* name);
+
+/** Create OpenCog-style PredicateNode for balance evaluation
+ * @param name Predicate name  
+ * @return Handle to predicate node atom
+ */
+GncAtomHandle gnc_atomspace_create_predicate_node(const char* name);
+
+/** Create OpenCog-style EvaluationLink for account balance
+ * @param predicate_atom Predicate atom handle
+ * @param account_atom Account atom handle
+ * @param truth_value Truth value for the evaluation
+ * @return Handle to evaluation link atom
+ */
+GncAtomHandle gnc_atomspace_create_evaluation_link(GncAtomHandle predicate_atom,
+                                                   GncAtomHandle account_atom,
+                                                   gdouble truth_value);
+
+/** Create OpenCog-style InheritanceLink for account hierarchy
+ * @param child_atom Child account atom handle
+ * @param parent_atom Parent account atom handle  
+ * @return Handle to inheritance link atom
+ */
+GncAtomHandle gnc_atomspace_create_inheritance_link(GncAtomHandle child_atom,
+                                                    GncAtomHandle parent_atom);
+
+/** Set truth value for atom (OpenCog-style)
+ * @param atom_handle Atom to update
+ * @param strength Truth strength (0.0-1.0)
+ * @param confidence Truth confidence (0.0-1.0)
+ */
+void gnc_atomspace_set_truth_value(GncAtomHandle atom_handle, 
+                                   gdouble strength, gdouble confidence);
+
+/** Get truth value for atom (OpenCog-style)
+ * @param atom_handle Atom to query
+ * @param strength Output parameter for truth strength
+ * @param confidence Output parameter for truth confidence
+ * @return TRUE if truth value exists, FALSE otherwise
+ */
+gboolean gnc_atomspace_get_truth_value(GncAtomHandle atom_handle,
+                                       gdouble* strength, gdouble* confidence);
 
 /** @} */
 
@@ -181,6 +274,95 @@ gnc_numeric gnc_ure_predict_balance(const Account *account, time64 future_date);
  * @return Validity probability with uncertainty quantification
  */
 gdouble gnc_ure_transaction_validity(const Transaction *transaction);
+
+/** @} */
+
+/** @name Scheme-based Cognitive Representations */
+/** @{ */
+
+/** Generate Scheme representation of account in AtomSpace
+ * @param account The account to represent
+ * @return Allocated string containing Scheme code (caller must free)
+ */
+char* gnc_account_to_scheme_representation(const Account *account);
+
+/** Generate Scheme representation of transaction pattern
+ * @param transaction The transaction to represent
+ * @return Allocated string containing Scheme code (caller must free)
+ */
+char* gnc_transaction_to_scheme_pattern(const Transaction *transaction);
+
+/** Evaluate Scheme expression in cognitive context
+ * @param scheme_expr Scheme expression to evaluate
+ * @return Result of evaluation (implementation-dependent)
+ */
+GncAtomHandle gnc_evaluate_scheme_expression(const char* scheme_expr);
+
+/** Create hypergraph pattern encoding for account hierarchy
+ * @param root_account Root of account hierarchy
+ * @return Allocated string with hypergraph pattern (caller must free)
+ */
+char* gnc_create_hypergraph_pattern_encoding(const Account *root_account);
+
+/** @} */
+
+/** @name Inter-Module Communication Protocols */
+/** @{ */
+
+/** Cognitive message for inter-module communication */
+typedef struct {
+    const char* source_module;    /**< Source module name */
+    const char* target_module;    /**< Target module name */
+    const char* message_type;     /**< Type of cognitive message */
+    GncAtomHandle payload_atom;   /**< Atom containing message payload */
+    gdouble priority;             /**< Message priority for attention allocation */
+    time64 timestamp;             /**< Message timestamp */
+} GncCognitiveMessage;
+
+/** Send cognitive message between modules
+ * @param message Cognitive message to send
+ * @return TRUE on successful delivery, FALSE otherwise
+ */
+gboolean gnc_send_cognitive_message(const GncCognitiveMessage* message);
+
+/** Register cognitive message handler for module
+ * @param module_name Name of module to register for
+ * @param handler_func Function to handle received messages
+ * @return TRUE on successful registration, FALSE otherwise
+ */
+typedef void (*GncCognitiveMessageHandler)(const GncCognitiveMessage* message);
+gboolean gnc_register_cognitive_message_handler(const char* module_name,
+                                               GncCognitiveMessageHandler handler_func);
+
+/** @} */
+
+/** @name Distributed Cognition and Emergent Behavior */
+/** @{ */
+
+/** Cognitive emergence detection parameters */
+typedef struct {
+    gdouble complexity_threshold;  /**< Minimum complexity for emergence detection */
+    gdouble coherence_measure;     /**< Coherence in cognitive patterns */
+    gdouble novelty_score;         /**< Novelty of emerging patterns */
+    gint pattern_frequency;        /**< Frequency of pattern occurrence */
+} GncEmergenceParams;
+
+/** Detect emergent cognitive patterns in account activity
+ * @param accounts Array of accounts to analyze
+ * @param n_accounts Number of accounts
+ * @param params Parameters for emergence detection
+ * @return Handle to atom representing detected emergent pattern
+ */
+GncAtomHandle gnc_detect_emergent_patterns(Account** accounts, gint n_accounts,
+                                          const GncEmergenceParams* params);
+
+/** Optimize attention allocation for distributed cognition
+ * @param cognitive_load Current cognitive load across modules
+ * @param available_resources Available cognitive resources
+ * @return Optimized attention allocation strategy
+ */
+GncAtomHandle gnc_optimize_distributed_attention(gdouble cognitive_load,
+                                                gdouble available_resources);
 
 /** @} */
 

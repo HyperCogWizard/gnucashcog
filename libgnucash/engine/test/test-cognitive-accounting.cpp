@@ -314,6 +314,248 @@ TEST_F(CognitiveAccountingTest, URETransactionValidity)
     EXPECT_LE(validity, 1.0);
 }
 
+TEST_F(CognitiveAccountingTest, OpenCogStyleAtomOperations)
+{
+    // Test OpenCog-style atom creation functions
+    GncAtomHandle concept_atom = gnc_atomspace_create_concept_node("TestConcept");
+    EXPECT_NE(concept_atom, 0);
+    
+    GncAtomHandle predicate_atom = gnc_atomspace_create_predicate_node("TestPredicate");
+    EXPECT_NE(predicate_atom, 0);
+    
+    // Test evaluation link creation
+    GncAtomHandle eval_link = gnc_atomspace_create_evaluation_link(
+        predicate_atom, concept_atom, 0.8);
+    EXPECT_NE(eval_link, 0);
+    
+    // Test truth value operations
+    gnc_atomspace_set_truth_value(concept_atom, 0.9, 0.85);
+    
+    gdouble strength, confidence;
+    gboolean result = gnc_atomspace_get_truth_value(concept_atom, &strength, &confidence);
+    EXPECT_TRUE(result);
+    EXPECT_DOUBLE_EQ(strength, 0.9);
+    EXPECT_DOUBLE_EQ(confidence, 0.85);
+}
+
+TEST_F(CognitiveAccountingTest, SchemeRepresentations)
+{
+    // Test Scheme representation generation
+    char* scheme_repr = gnc_account_to_scheme_representation(checking_account);
+    EXPECT_NE(scheme_repr, nullptr);
+    
+    // Should contain key Scheme constructs
+    EXPECT_TRUE(strstr(scheme_repr, "ConceptNode") != nullptr);
+    EXPECT_TRUE(strstr(scheme_repr, "InheritanceLink") != nullptr);
+    EXPECT_TRUE(strstr(scheme_repr, "EvaluationLink") != nullptr);
+    EXPECT_TRUE(strstr(scheme_repr, "Account:Checking") != nullptr);
+    
+    g_free(scheme_repr);
+    
+    // Test hypergraph pattern encoding
+    char* hypergraph_pattern = gnc_create_hypergraph_pattern_encoding(root_account);
+    EXPECT_NE(hypergraph_pattern, nullptr);
+    
+    EXPECT_TRUE(strstr(hypergraph_pattern, "BindLink") != nullptr);
+    EXPECT_TRUE(strstr(hypergraph_pattern, "VariableNode") != nullptr);
+    
+    g_free(hypergraph_pattern);
+}
+
+TEST_F(CognitiveAccountingTest, CognitiveMessagePassing)
+{
+    // Test inter-module communication
+    gboolean message_received = FALSE;
+    
+    // Register message handler
+    auto test_handler = [](const GncCognitiveMessage* message) {
+        // This would be called when message is received
+        g_message("Received cognitive message: %s -> %s", 
+                  message->source_module, message->target_module);
+    };
+    
+    EXPECT_TRUE(gnc_register_cognitive_message_handler("TestModule", test_handler));
+    
+    // Create and send a test message
+    GncCognitiveMessage message = {};
+    message.source_module = "AtomSpace";
+    message.target_module = "TestModule";
+    message.message_type = "ActivationUpdate";
+    message.payload_atom = gnc_atomspace_create_concept_node("TestPayload");
+    message.priority = 0.8;
+    message.timestamp = time(nullptr);
+    
+    EXPECT_TRUE(gnc_send_cognitive_message(&message));
+}
+
+TEST_F(CognitiveAccountingTest, EmergentPatternDetection)
+{
+    // Set up test accounts with activity
+    Account* test_accounts[] = {checking_account, expense_account, income_account};
+    gint n_accounts = 3;
+    
+    // Create some transactions to generate activity patterns
+    Transaction *trans1 = xaccMallocTransaction(book);
+    xaccTransBeginEdit(trans1);
+    
+    Split *split1 = xaccMallocSplit(book);
+    xaccSplitSetAccount(split1, checking_account);
+    xaccSplitSetAmount(split1, gnc_numeric_create(5000, 100)); // $50.00
+    xaccSplitSetParent(split1, trans1);
+    
+    Split *split2 = xaccMallocSplit(book);
+    xaccSplitSetAccount(split2, expense_account);
+    xaccSplitSetAmount(split2, gnc_numeric_create(-5000, 100)); // -$50.00
+    xaccSplitSetParent(split2, trans1);
+    
+    xaccTransCommitEdit(trans1);
+    
+    // Update attention for all accounts
+    for (int i = 0; i < n_accounts; i++) {
+        gnc_ecan_update_account_attention(test_accounts[i], trans1);
+    }
+    
+    // Test emergence detection
+    GncEmergenceParams params = {};
+    params.complexity_threshold = 0.05;
+    params.coherence_measure = 0.1;
+    params.novelty_score = 0.1;
+    params.pattern_frequency = 1;
+    
+    GncAtomHandle emergent_pattern = gnc_detect_emergent_patterns(
+        test_accounts, n_accounts, &params);
+    
+    // Should detect some pattern given the activity
+    EXPECT_NE(emergent_pattern, 0);
+}
+
+TEST_F(CognitiveAccountingTest, DistributedAttentionOptimization)
+{
+    // Test distributed attention optimization
+    gdouble cognitive_load = 0.7;
+    gdouble available_resources = 1.0;
+    
+    GncAtomHandle optimization_strategy = gnc_optimize_distributed_attention(
+        cognitive_load, available_resources);
+    
+    EXPECT_NE(optimization_strategy, 0);
+    
+    // Verify truth value was set
+    gdouble strength, confidence;
+    gboolean result = gnc_atomspace_get_truth_value(optimization_strategy, &strength, &confidence);
+    EXPECT_TRUE(result);
+    EXPECT_GT(strength, 0.0);
+    EXPECT_GT(confidence, 0.0);
+}
+
+TEST_F(CognitiveAccountingTest, EnhancedECANAttention)
+{
+    // Test enhanced ECAN attention allocation
+    Transaction *transaction = xaccMallocTransaction(book);
+    xaccTransBeginEdit(transaction);
+    
+    Split *split1 = xaccMallocSplit(book);
+    xaccSplitSetAccount(split1, checking_account);
+    xaccSplitSetAmount(split1, gnc_numeric_create(2500, 100)); // $25.00
+    xaccSplitSetParent(split1, transaction);
+    
+    Split *split2 = xaccMallocSplit(book);
+    xaccSplitSetAccount(split2, income_account);
+    xaccSplitSetAmount(split2, gnc_numeric_create(-2500, 100)); // -$25.00
+    xaccSplitSetParent(split2, transaction);
+    
+    xaccTransCommitEdit(transaction);
+    
+    // Update attention with new ECAN mechanics
+    gnc_ecan_update_account_attention(checking_account, transaction);
+    
+    // Get attention parameters and verify they use new structure
+    GncAttentionParams params = gnc_ecan_get_attention_params(checking_account);
+    
+    // New ECAN parameters should be set
+    EXPECT_GE(params.sti, 0.0);
+    EXPECT_GE(params.lti, 0.0);
+    EXPECT_GE(params.wage, 0.0);
+    EXPECT_GE(params.rent, 0.0);
+    
+    // Legacy compatibility should still work
+    EXPECT_GE(params.importance, 0.0);
+    EXPECT_GE(params.attention_value, 0.0);
+}
+
+TEST_F(CognitiveAccountingTest, EnhancedMOSESEvolution)
+{
+    // Create historical transactions for MOSES analysis
+    std::vector<Transaction*> historical_transactions;
+    
+    for (int i = 0; i < 5; i++) {
+        Transaction *trans = xaccMallocTransaction(book);
+        xaccTransBeginEdit(trans);
+        
+        Split *split1 = xaccMallocSplit(book);
+        xaccSplitSetAccount(split1, checking_account);
+        xaccSplitSetAmount(split1, gnc_numeric_create(1000 * (i + 1), 100));
+        xaccSplitSetParent(split1, trans);
+        
+        Split *split2 = xaccMallocSplit(book);
+        xaccSplitSetAccount(split2, expense_account);
+        xaccSplitSetAmount(split2, gnc_numeric_create(-1000 * (i + 1), 100));
+        xaccSplitSetParent(split2, trans);
+        
+        xaccTransCommitEdit(trans);
+        historical_transactions.push_back(trans);
+    }
+    
+    // Convert to array for function call
+    Transaction** trans_array = historical_transactions.data();
+    
+    // Test enhanced MOSES strategy discovery
+    GncAtomHandle strategy = gnc_moses_discover_balancing_strategies(
+        trans_array, historical_transactions.size());
+    
+    EXPECT_NE(strategy, 0);
+    
+    // Verify truth value was set based on fitness
+    gdouble strength, confidence;
+    gboolean result = gnc_atomspace_get_truth_value(strategy, &strength, &confidence);
+    EXPECT_TRUE(result);
+    EXPECT_GT(strength, 0.0);
+    EXPECT_GT(confidence, 0.0);
+}
+
+TEST_F(CognitiveAccountingTest, EnhancedUREPrediction)
+{
+    // Test enhanced URE balance prediction
+    time64 future_date = time(nullptr) + 86400 * 30; // 30 days from now
+    
+    gnc_numeric predicted_balance = gnc_ure_predict_balance(checking_account, future_date);
+    
+    // Should return some prediction (not just current balance for future dates)
+    EXPECT_TRUE(gnc_numeric_check(predicted_balance) == GNC_ERROR_OK);
+    
+    // Test enhanced URE transaction validity
+    Transaction *transaction = xaccMallocTransaction(book);
+    xaccTransBeginEdit(transaction);
+    
+    Split *split1 = xaccMallocSplit(book);
+    xaccSplitSetAccount(split1, checking_account);
+    xaccSplitSetAmount(split1, gnc_numeric_create(7500, 100)); // $75.00
+    xaccSplitSetParent(split1, transaction);
+    
+    Split *split2 = xaccMallocSplit(book);
+    xaccSplitSetAccount(split2, income_account);
+    xaccSplitSetAmount(split2, gnc_numeric_create(-7500, 100)); // -$75.00
+    xaccSplitSetParent(split2, transaction);
+    
+    xaccTransCommitEdit(transaction);
+    
+    gdouble validity = gnc_ure_transaction_validity(transaction);
+    
+    // Should incorporate uncertainty factors
+    EXPECT_GT(validity, 0.0);
+    EXPECT_LE(validity, 1.0);
+}
+
 TEST_F(CognitiveAccountingTest, CognitiveAccountTypes)
 {
     // Test setting and getting cognitive account types

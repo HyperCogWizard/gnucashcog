@@ -227,6 +227,94 @@ pkg_check_modules (GTHREAD REQUIRED gthread-2.0)
 
 pkg_check_modules (LIBXML2 REQUIRED libxml-2.0>=2.9.4)
 pkg_check_modules (LIBXSLT REQUIRED libxslt)
+
+# ############################################################
+# OpenCog Core Modules Integration
+# ############################################################
+
+# Find OpenCog dependencies
+find_package(PkgConfig REQUIRED)
+
+# OpenCog cogutil - Core utilities
+pkg_check_modules(OPENCOG_COGUTIL cogutil>=2.0.0)
+if (OPENCOG_COGUTIL_FOUND)
+    message(STATUS "Found OpenCog cogutil: ${OPENCOG_COGUTIL_VERSION}")
+    set(HAVE_OPENCOG_COGUTIL 1)
+    add_definitions(-DHAVE_OPENCOG_COGUTIL)
+else()
+    message(WARNING "OpenCog cogutil not found - using fallback implementation")
+endif()
+
+# OpenCog atomspace - Hypergraph database
+pkg_check_modules(OPENCOG_ATOMSPACE atomspace>=5.0.0)
+if (OPENCOG_ATOMSPACE_FOUND)
+    message(STATUS "Found OpenCog atomspace: ${OPENCOG_ATOMSPACE_VERSION}")
+    set(HAVE_OPENCOG_ATOMSPACE 1)
+    add_definitions(-DHAVE_OPENCOG_ATOMSPACE)
+else()
+    message(WARNING "OpenCog atomspace not found - using simulated implementation")
+endif()
+
+# OpenCog cogserver - Network server
+pkg_check_modules(OPENCOG_COGSERVER cogserver>=1.0.0)
+if (OPENCOG_COGSERVER_FOUND)
+    message(STATUS "Found OpenCog cogserver: ${OPENCOG_COGSERVER_VERSION}")
+    set(HAVE_OPENCOG_COGSERVER 1)
+    add_definitions(-DHAVE_OPENCOG_COGSERVER)
+else()
+    message(WARNING "OpenCog cogserver not found - network features disabled")
+endif()
+
+# OpenCog attention (ECAN) - Economic Attention Allocation
+pkg_check_modules(OPENCOG_ATTENTION attention>=2.0.0)
+if (OPENCOG_ATTENTION_FOUND)
+    message(STATUS "Found OpenCog attention: ${OPENCOG_ATTENTION_VERSION}")
+    set(HAVE_OPENCOG_ATTENTION 1)
+    add_definitions(-DHAVE_OPENCOG_ATTENTION)
+else()
+    message(WARNING "OpenCog attention not found - using basic attention allocation")
+endif()
+
+# OpenCog ASMOSES - Meta-Optimizing Semantic Evolutionary Search
+pkg_check_modules(OPENCOG_ASMOSES asmoses>=3.0.0)
+if (OPENCOG_ASMOSES_FOUND)
+    message(STATUS "Found OpenCog asmoses: ${OPENCOG_ASMOSES_VERSION}")
+    set(HAVE_OPENCOG_ASMOSES 1)
+    add_definitions(-DHAVE_OPENCOG_ASMOSES)
+else()
+    message(WARNING "OpenCog asmoses not found - evolutionary optimization disabled")
+endif()
+
+# OpenCog URE - Uncertain Reasoning Engine
+pkg_check_modules(OPENCOG_URE ure>=3.0.0)
+if (OPENCOG_URE_FOUND)
+    message(STATUS "Found OpenCog ure: ${OPENCOG_URE_VERSION}")
+    set(HAVE_OPENCOG_URE 1)
+    add_definitions(-DHAVE_OPENCOG_URE)
+else()
+    message(WARNING "OpenCog ure not found - using basic uncertainty quantification")
+endif()
+
+# OpenCog PLN - Probabilistic Logic Networks
+pkg_check_modules(OPENCOG_PLN pln>=2.0.0)
+if (OPENCOG_PLN_FOUND)
+    message(STATUS "Found OpenCog pln: ${OPENCOG_PLN_VERSION}")
+    set(HAVE_OPENCOG_PLN 1)
+    add_definitions(-DHAVE_OPENCOG_PLN)
+else()
+    message(WARNING "OpenCog pln not found - using basic probabilistic reasoning")
+endif()
+
+# Consolidate OpenCog flags
+if (OPENCOG_ATOMSPACE_FOUND AND OPENCOG_COGUTIL_FOUND)
+    set(HAVE_OPENCOG_CORE 1)
+    add_definitions(-DHAVE_OPENCOG_CORE)
+    message(STATUS "OpenCog core integration enabled")
+else()
+    message(STATUS "OpenCog core integration disabled - using simulated cognitive framework")
+endif()
+
+# ############################################################
 if (WITH_GNUCASH)
   if (WIN32)
     pkg_check_modules (WEBKIT REQUIRED IMPORTED_TARGET webkitgtk-3.0)

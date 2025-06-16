@@ -563,13 +563,51 @@ gdouble gnc_pln_validate_double_entry(const Transaction *transaction)
     }
 #endif
     
-    // Basic PLN confidence based on how close to zero the total is
+    // Enhanced PLN truth value computation with multi-factor uncertainty quantification
 //>>>>>>> stable
+    
+    // Multi-factor analysis components
+    gdouble transaction_complexity = std::log1p(split_count) / std::log(10.0); // log scale complexity
+    gdouble temporal_uncertainty = 1.0; // Account for transaction age
+    gdouble account_reliability = 1.0; // Attention-based credibility assessment
+    
+    // Calculate account reliability using attention parameters
+    gdouble total_attention = 0.0;
+    gint valid_accounts = 0;
+    for (GList *node = splits; node; node = node->next) {
+        Split *split = GNC_SPLIT(node->data);
+        Account *account = xaccSplitGetAccount(split);
+        if (account) {
+            GncAttentionParams params = gnc_ecan_get_attention_params(account);
+            total_attention += params.sti + params.lti;
+            valid_accounts++;
+        }
+    }
+    if (valid_accounts > 0) {
+        account_reliability = std::min(1.0, total_attention / (valid_accounts * 100.0));
+    }
+    
+    // Temporal uncertainty based on transaction timestamp
+    time64 tx_time = xaccTransGetDatePosted(transaction);
+    time64 current_time = gnc_time(nullptr);
+    gdouble age_days = (current_time - tx_time) / (24.0 * 3600.0);
+    temporal_uncertainty = exp(-age_days / 365.0); // Decay over a year
+    
     if (gnc_numeric_zero_p(total)) {
-        strength = 1.0; // Perfect balance
-        confidence = std::min(1.0, split_count / 10.0); // More splits = more evidence
+        // Perfect balance - enhanced PLN reasoning
+        strength = 0.98;
+        
+        // Evidence integration: more splits and higher attention = higher confidence
+        gdouble evidence_strength = std::min(0.99, 0.5 + 0.05 * split_count);
+        gdouble complexity_factor = 1.0 - 0.15 * std::min(1.0, transaction_complexity);
+        gdouble reliability_factor = 0.8 + 0.2 * account_reliability;
+        gdouble temporal_factor = 0.9 + 0.1 * temporal_uncertainty;
+        
+        confidence = evidence_strength * complexity_factor * reliability_factor * temporal_factor;
+        confidence = std::max(0.6, std::min(0.99, confidence));
+        
     } else {
-        // Imbalance analysis with PLN-style reasoning
+        // Imbalanced transaction - advanced PLN uncertain reasoning
         double imbalance = gnc_numeric_to_double(gnc_numeric_abs(total));
         
         // Calculate total transaction magnitude for normalization
@@ -581,25 +619,44 @@ gdouble gnc_pln_validate_double_entry(const Transaction *transaction)
         if (total_magnitude > 0.0) {
             double relative_imbalance = imbalance / total_magnitude;
             
-            // PLN strength function: exponential decay with imbalance
-            strength = exp(-10.0 * relative_imbalance);
+            // Enhanced PLN strength with multiple factors
+            strength = exp(-8.0 * relative_imbalance) * account_reliability * temporal_uncertainty;
             
-            // Confidence decreases with larger relative imbalance and fewer splits
-            confidence = std::max(0.1, 1.0 - relative_imbalance) * 
-                        std::min(1.0, split_count / 5.0);
+            // Advanced confidence computation with uncertainty quantification
+            gdouble base_confidence = 1.0 - relative_imbalance;
+            gdouble evidence_factor = std::min(1.0, split_count / 4.0);
+            gdouble complexity_penalty = 1.0 - 0.1 * transaction_complexity;
+            
+            confidence = base_confidence * evidence_factor * complexity_penalty * 
+                        account_reliability * temporal_uncertainty;
+            confidence = std::max(0.05, std::min(0.95, confidence));
         }
     }
     
-    // Create PLN atoms for this validation
-    if (strength > 0.5) {
+    // Create enhanced PLN atoms for this validation with evidence integration
+    if (strength > 0.1) {
+        std::string validation_name = "DoubleEntryValidation:TX:" + 
+                                     std::to_string(reinterpret_cast<uintptr_t>(transaction)) +
+                                     ":Splits:" + std::to_string(split_count);
+        
         GncAtomHandle validation_atom = g_atomspace->create_atom(
-            GNC_ATOM_IMPLICATION_LINK, 
-            "DoubleEntryValidation:" + std::to_string(reinterpret_cast<uintptr_t>(transaction))
-        );
+            GNC_ATOM_IMPLICATION_LINK, validation_name);
         gnc_atomspace_set_truth_value(validation_atom, strength, confidence);
+        
+        // Create evidence integration atoms for multi-factor analysis
+        std::string evidence_name = "ValidationEvidence:Complexity:" + 
+                                   std::to_string(transaction_complexity) +
+                                   ":Reliability:" + std::to_string(account_reliability);
+        GncAtomHandle evidence_atom = g_atomspace->create_atom(
+            GNC_ATOM_EVALUATION_LINK, evidence_name);
+        gnc_atomspace_set_truth_value(evidence_atom, 
+                                     (transaction_complexity + account_reliability) / 2.0, 
+                                     temporal_uncertainty);
     }
     
-    g_debug("PLN double-entry validation: strength=%.3f, confidence=%.3f", strength, confidence);
+    g_debug("Enhanced PLN double-entry validation: strength=%.3f, confidence=%.3f, "
+            "complexity=%.3f, reliability=%.3f, temporal=%.3f", 
+            strength, confidence, transaction_complexity, account_reliability, temporal_uncertainty);
     
     // Return combined truth value for backward compatibility
     return strength * confidence;
@@ -1028,7 +1085,7 @@ void gnc_ecan_update_account_attention(Account *account,
     if (atom_handle == 0) return;
     
 #ifdef HAVE_OPENCOG_ATTENTION
-    // Use real ECAN attention allocation
+    // Enhanced ECAN attention allocation with real OpenCog integration
     try {
 #ifdef HAVE_OPENCOG_ATOMSPACE
         auto handle_it = g_atomspace->opencog_handles.find(atom_handle);
@@ -1038,16 +1095,38 @@ void gnc_ecan_update_account_attention(Account *account,
             // Get current attention value
             AttentionValuePtr av = g_atomspace->atomspace->get_attentionvalue(opencog_handle);
             
-            // Increase STI (Short-Term Importance) based on transaction activity
-            AttentionValue::sti_t new_sti = av->getSTI() + 10;
-            AttentionValue::lti_t new_lti = av->getLTI() + 1;
+            // Calculate activity-based STI increase
+            GList *splits = xaccTransGetSplitList(transaction);
+            gint split_count = g_list_length(splits);
+            gdouble transaction_magnitude = 0.0;
+            
+            for (GList *node = splits; node; node = node->next) {
+                Split *split = GNC_SPLIT(node->data);
+                if (xaccSplitGetAccount(split) == account) {
+                    gnc_numeric amount = xaccSplitGetAmount(split);
+                    transaction_magnitude += std::abs(gnc_numeric_to_double(amount));
+                }
+            }
+            
+            // Sophisticated STI/LTI dynamics with cognitive economics
+            AttentionValue::sti_t base_sti_boost = 5 + (split_count * 2);
+            AttentionValue::sti_t magnitude_boost = (AttentionValue::sti_t)(transaction_magnitude / 100.0);
+            AttentionValue::sti_t total_sti_boost = base_sti_boost + magnitude_boost;
+            
+            AttentionValue::sti_t new_sti = av->getSTI() + total_sti_boost;
+            AttentionValue::lti_t new_lti = av->getLTI() + (total_sti_boost / 10); // LTI grows more slowly
             AttentionValue::vlti_t new_vlti = av->getVLTI();
+            
+            // VLTI updates for very high activity accounts
+            if (new_sti > 1000) {
+                new_vlti = av->getVLTI() + 1;
+            }
             
             AttentionValuePtr new_av = createAV(new_sti, new_lti, new_vlti);
             g_atomspace->atomspace->set_attentionvalue(opencog_handle, new_av);
             
-            g_debug("Updated ECAN attention for account %s: STI=%d, LTI=%d",
-                    xaccAccountGetName(account), new_sti, new_lti);
+            g_debug("Enhanced ECAN attention for account %s: STI=%d, LTI=%d, VLTI=%d, magnitude=%.2f",
+                    xaccAccountGetName(account), new_sti, new_lti, new_vlti, transaction_magnitude);
         }
 #endif
     } catch (const std::exception& e) {
@@ -1056,41 +1135,70 @@ void gnc_ecan_update_account_attention(Account *account,
     }
 #endif
     
-    // Basic attention parameters update (fallback or additional)
-#ifdef HAVE_OPENCOG_ATOMSPACE
+    // Enhanced attention parameters update with cognitive economics
     auto& params = g_atomspace->attention_params[atom_handle];
-#else
-    auto& params = g_atomspace->attention_params[atom_handle];
-#endif
     
-    // OpenCog ECAN-style attention updates
-    gdouble activity_boost = 0.1;
-    gdouble wage_payment = params.wage * activity_boost;
+    // Calculate transaction activity metrics
+    GList *splits = xaccTransGetSplitList(transaction);
+    gint split_count = g_list_length(splits);
+    gdouble transaction_magnitude = 0.0;
     
-    // Increase STI based on transaction activity
+    for (GList *node = splits; node; node = node->next) {
+        Split *split = GNC_SPLIT(node->data);
+        if (xaccSplitGetAccount(split) == account) {
+            gnc_numeric amount = xaccSplitGetAmount(split);
+            transaction_magnitude += std::abs(gnc_numeric_to_double(amount));
+        }
+    }
+    
+    // Sophisticated ECAN-style attention updates with cognitive economics
+    gdouble activity_boost = 0.05 + (split_count * 0.02) + (transaction_magnitude / 10000.0);
+    activity_boost = std::min(0.5, activity_boost); // Cap the boost
+    
+    // Cognitive wage calculation based on account importance and activity
+    gdouble base_wage = params.wage;
+    gdouble importance_multiplier = 1.0 + (params.lti / 100.0);
+    gdouble activity_multiplier = 1.0 + params.activity_level;
+    gdouble wage_payment = base_wage * importance_multiplier * activity_multiplier * activity_boost;
+    
+    // STI allocation with fund management
     if (g_atomspace->total_sti_funds >= wage_payment) {
         params.sti += wage_payment;
         g_atomspace->total_sti_funds -= wage_payment;
-        params.activity_level += 0.1;
+        params.activity_level += activity_boost;
+        
+        // Apply cognitive rent for maintaining attention
+        gdouble rent_payment = params.rent * (1.0 + params.sti / 100.0);
+        if (params.sti > rent_payment) {
+            params.sti -= rent_payment;
+        }
     }
     
-    // Gradual LTI increase for frequently used accounts
-    params.lti += 0.01;
+    // LTI growth based on sustained activity
+    gdouble lti_growth = activity_boost * 0.1;
+    if (g_atomspace->total_lti_funds >= lti_growth) {
+        params.lti += lti_growth;
+        g_atomspace->total_lti_funds -= lti_growth;
+    }
+    
+    // VLTI for very long-term important accounts
+    if (params.lti > 50.0 && params.activity_level > 1.0) {
+        params.vlti += 0.001;
+    }
+    
+    // Attention decay over time
+    params.sti *= (1.0 - g_atomspace->attention_decay_rate);
+    params.activity_level *= 0.98; // Gradual activity decay
     
     // Update legacy compatibility fields
-    params.importance = (params.sti + params.lti) / 2.0;
-    params.attention_value = std::min(1.0, params.sti / 100.0);
+    params.importance = (params.sti + params.lti * 10.0) / 11.0;
+    params.attention_value = std::min(1.0, (params.sti + params.lti + params.vlti * 100.0) / 200.0);
     
-//<<<<<<< copilot/fix-1-3
-    g_debug("Updated ECAN attention for account %s: STI=%.3f, LTI=%.3f, activity=%.3f",
-            xaccAccountGetName(account), params.sti, params.lti, params.activity_level);
-//=======
-    // Trigger Scheme-based attention update for neural-symbolic synergy
-    gnc_scheme_trigger_attention_update(account, params.activity_level);
-    
-    g_debug("Updated attention for account %s: importance=%.3f, attention=%.3f",
-            xaccAccountGetName(account), params.importance, params.attention_value);
-//>>>>>>> stable
+    g_debug("Enhanced ECAN attention for account %s: STI=%.3f, LTI=%.3f, VLTI=%.3f, "
+            "activity=%.3f, wage=%.3f, rent=%.3f, funds_sti=%.1f, funds_lti=%.1f",
+            xaccAccountGetName(account), params.sti, params.lti, params.vlti,
+            params.activity_level, wage_payment, params.rent, 
+            g_atomspace->total_sti_funds, g_atomspace->total_lti_funds);
 }
 
 GncAttentionParams gnc_ecan_get_attention_params(const Account *account)
@@ -1127,39 +1235,95 @@ void gnc_ecan_allocate_attention(Account **accounts, gint n_accounts)
         return;
     }
     
-    // OpenCog ECAN-style attention allocation with economics
+    // Enhanced ECAN-style attention allocation with sophisticated cognitive economics
     gdouble total_sti = 0.0;
+    gdouble total_lti = 0.0;
+    gdouble total_activity = 0.0;
     std::vector<GncAtomHandle> account_handles;
+    std::vector<gdouble> activity_scores;
     
-    // Collect all account handles and calculate total STI
+    // Collect all account handles and calculate totals
     for (gint i = 0; i < n_accounts; i++) {
         auto it = g_atomspace->account_atoms.find(accounts[i]);
         if (it != g_atomspace->account_atoms.end()) {
             account_handles.push_back(it->second);
             auto& params = g_atomspace->attention_params[it->second];
+            
             total_sti += params.sti;
+            total_lti += params.lti;
+            total_activity += params.activity_level;
+            
+            // Calculate activity score for resource allocation
+            gdouble activity_score = params.activity_level + (params.sti / 100.0) + (params.lti / 50.0);
+            activity_scores.push_back(activity_score);
         }
     }
     
-    // Normalize STI values if total exceeds fund limits
-    if (total_sti > g_atomspace->total_sti_funds) {
-        gdouble normalization_factor = g_atomspace->total_sti_funds / total_sti;
+    // Activity-based resource allocation
+    if (total_activity > 0.0) {
+        gdouble available_sti_boost = g_atomspace->total_sti_funds * 0.1; // Use 10% of funds for reallocation
+        gdouble available_lti_boost = g_atomspace->total_lti_funds * 0.05; // Use 5% of funds for LTI boost
+        
+        for (size_t i = 0; i < account_handles.size(); i++) {
+            auto& params = g_atomspace->attention_params[account_handles[i]];
+            
+            // Proportional allocation based on activity
+            gdouble activity_ratio = activity_scores[i] / total_activity;
+            gdouble sti_allocation = available_sti_boost * activity_ratio;
+            gdouble lti_allocation = available_lti_boost * activity_ratio;
+            
+            params.sti += sti_allocation;
+            params.lti += lti_allocation;
+            
+            // Update fund tracking
+            g_atomspace->total_sti_funds -= sti_allocation;
+            g_atomspace->total_lti_funds -= lti_allocation;
+        }
+    }
+    
+    // STI normalization if total exceeds fund limits
+    gdouble updated_total_sti = 0.0;
+    for (auto handle : account_handles) {
+        updated_total_sti += g_atomspace->attention_params[handle].sti;
+    }
+    
+    if (updated_total_sti > g_atomspace->total_sti_funds) {
+        gdouble normalization_factor = g_atomspace->total_sti_funds / updated_total_sti;
         
         for (auto handle : account_handles) {
             auto& params = g_atomspace->attention_params[handle];
             params.sti *= normalization_factor;
-            
-            // Update legacy fields
-            params.importance = (params.sti + params.lti) / 2.0;
-            params.attention_value = std::min(1.0, params.sti / 100.0);
         }
     }
     
-    // Apply attention decay to all atoms
-    g_atomspace->apply_attention_decay();
+    // Apply cognitive rent and attention decay
+    for (auto handle : account_handles) {
+        auto& params = g_atomspace->attention_params[handle];
+        
+        // Cognitive rent payment
+        gdouble rent_payment = params.rent * (1.0 + params.sti / 200.0);
+        if (params.sti > rent_payment) {
+            params.sti -= rent_payment;
+        }
+        
+        // Attention decay
+        params.sti *= (1.0 - g_atomspace->attention_decay_rate);
+        params.activity_level *= 0.95; // Activity decay
+        
+        // Update legacy compatibility fields
+        params.importance = (params.sti + params.lti * 10.0) / 11.0;
+        params.attention_value = std::min(1.0, (params.sti + params.lti + params.vlti * 100.0) / 200.0);
+    }
     
-    g_message("Allocated ECAN attention across %d accounts with total STI: %.2f", 
-              n_accounts, total_sti);
+    // Fund replenishment (simulation of cognitive resource generation)
+    g_atomspace->total_sti_funds = std::min(2000.0, g_atomspace->total_sti_funds + 50.0);
+    g_atomspace->total_lti_funds = std::min(1000.0, g_atomspace->total_lti_funds + 10.0);
+    
+    g_debug("Enhanced ECAN attention allocation across %d accounts: "
+            "total_sti=%.2f, total_lti=%.2f, total_activity=%.2f, "
+            "sti_funds=%.1f, lti_funds=%.1f", 
+            n_accounts, updated_total_sti, total_lti, total_activity,
+            g_atomspace->total_sti_funds, g_atomspace->total_lti_funds);
 }
 
 /********************************************************************\

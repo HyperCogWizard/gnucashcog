@@ -315,6 +315,33 @@ else()
 endif()
 
 # ############################################################
+# GGML Tensor Network Integration
+# ############################################################
+
+# Find ggml library for tensor operations
+find_library(GGML_LIBRARY ggml)
+find_path(GGML_INCLUDE_DIR ggml.h)
+
+if (GGML_LIBRARY AND GGML_INCLUDE_DIR)
+    message(STATUS "Found ggml library: ${GGML_LIBRARY}")
+    message(STATUS "Found ggml headers: ${GGML_INCLUDE_DIR}")
+    set(HAVE_GGML 1)
+    add_definitions(-DHAVE_GGML)
+    set(GGML_LIBRARIES ${GGML_LIBRARY})
+    set(GGML_INCLUDE_DIRS ${GGML_INCLUDE_DIR})
+else()
+    message(WARNING "ggml library not found - using fallback tensor implementation")
+    set(HAVE_GGML 0)
+endif()
+
+# Cogfluence Financial Clustering Integration
+# Note: This would typically be a separate library or module
+# For now, we'll include it as part of the cognitive framework
+set(HAVE_COGFLUENCE_CLUSTERING 1)
+add_definitions(-DHAVE_COGFLUENCE_CLUSTERING)
+message(STATUS "Cogfluence financial clustering paradigms integrated")
+
+# ############################################################
 if (WITH_GNUCASH)
   if (WIN32)
     pkg_check_modules (WEBKIT REQUIRED IMPORTED_TARGET webkitgtk-3.0)

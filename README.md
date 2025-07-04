@@ -22,7 +22,15 @@ Table of Contents:
 Overview
 --------
 
-GnuCash is a personal and small business double entry accounting application.
+GnuCash is a personal and small business double entry accounting application with advanced cognitive accounting capabilities.
+
+**GnuCash Cognitive Engine Features:**
+- **Distributed Tensor Network**: Agentic cognitive system with Memory, Task, AI, and Autonomy nodes
+- **ggml Integration**: High-performance tensor operations for financial data processing
+- **Cogfluence Clustering**: Advanced financial pattern recognition and clustering algorithms
+- **OpenCog Framework**: Neural-symbolic reasoning with AtomSpace, PLN, ECAN, and MOSES
+- **ECAN Attention Allocation**: Economic attention allocation for cognitive resource management
+- **Message Passing Architecture**: Distributed inter-node communication protocols
 
 Home Page:
 https://www.gnucash.org/
@@ -32,6 +40,10 @@ https://wiki.gnucash.org/wiki/GnuCash
 
 Precompiled binaries:
 https://www.gnucash.org/download
+
+Cognitive Architecture Documentation:
+- [Cognitive Accounting Framework](COGNITIVE_ACCOUNTING.md)
+- [Tensor Network Architecture](TENSOR_NETWORK_ARCHITECTURE.md)
 
 ############
 Dependencies

@@ -57,6 +57,7 @@ set (engine_HEADERS
   gnc-cognitive-accounting.h
   gnc-cognitive-scheme.h
   gnc-cognitive-comms.h
+  gnc-tensor-network.h
   gnc-commodity.h
   gnc-commodity.hpp
   gnc-date.h
@@ -161,6 +162,7 @@ set (engine_SOURCES
   gnc-cognitive-accounting.cpp
   gnc-cognitive-scheme.cpp
   gnc-cognitive-comms.cpp
+  gnc-tensor-network.cpp
   gnc-commodity.cpp
   gnc-date.cpp
   gnc-datetime.cpp

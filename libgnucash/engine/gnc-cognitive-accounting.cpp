@@ -16,6 +16,7 @@
 #include "gnc-cognitive-accounting.h"
 #include "gnc-cognitive-scheme.h"
 #include "gnc-cognitive-comms.h"
+#include "gnc-tensor-network.h"
 #include "Account.h"
 #include "Split.h"
 #include "Transaction.h"
@@ -399,6 +400,13 @@ gboolean gnc_cognitive_accounting_init(void)
         g_warning("Failed to initialize cognitive communication hub");
     }
     
+    // Initialize distributed tensor network
+    if (!gnc_tensor_network_init()) {
+        g_warning("Failed to initialize tensor network - using fallback implementation");
+    } else {
+        g_message("Distributed ggml tensor network initialized successfully");
+    }
+    
     // Register core modules with communication hub
     gnc_cognitive_register_module(GNC_MODULE_ATOMSPACE);
     gnc_cognitive_register_module(GNC_MODULE_PLN);
@@ -424,6 +432,9 @@ void gnc_cognitive_accounting_shutdown(void)
     
     // Shutdown communication protocols
     gnc_cognitive_comms_shutdown();
+    
+    // Shutdown tensor network
+    gnc_tensor_network_shutdown();
     
     g_atomspace.reset();
     g_message("Cognitive accounting AtomSpace shutdown");

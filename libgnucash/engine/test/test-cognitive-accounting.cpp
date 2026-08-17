@@ -82,7 +82,6 @@ protected:
     {
         Transaction *transaction = xaccMallocTransaction(book);
         xaccTransBeginEdit(transaction);
-    xaccTransSetCurrency(transaction, currency);
         xaccTransSetCurrency(transaction, currency);
 
         Split *split1 = xaccMallocSplit(book);

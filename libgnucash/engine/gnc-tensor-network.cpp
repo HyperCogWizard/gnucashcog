@@ -809,7 +809,7 @@ gboolean gnc_tensor_network_health_check(GncTensorNetwork *network)
     
     g_message("Network health: %d/%d nodes active", active_nodes, total_nodes);
     
-    /* Network structure is healthy if it exists; zero active nodes is allowed
-     * (idle / paused). */
-    return network->network_active || total_nodes >= 0;
+    /* Healthy when the network is marked active. Idle (zero active nodes)
+     * is allowed while the network remains structurally active. */
+    return network->network_active;
 }

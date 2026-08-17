@@ -270,6 +270,7 @@ target_link_libraries(gnc-engine
     $<$<BOOL:${HAVE_OPENCOG_ASMOSES}>:${OPENCOG_ASMOSES_LIBRARIES}>
     $<$<BOOL:${HAVE_OPENCOG_URE}>:${OPENCOG_URE_LIBRARIES}>
     $<$<BOOL:${HAVE_OPENCOG_PLN}>:${OPENCOG_PLN_LIBRARIES}>
+    $<$<BOOL:${HAVE_GGML}>:${GGML_LIBRARIES}>
     $<$<BOOL:${WIN32}>:bcrypt.lib>)
 
 target_compile_definitions (gnc-engine PRIVATE -DG_LOG_DOMAIN=\"gnc.engine\")
@@ -277,6 +278,7 @@ target_compile_definitions (gnc-engine PRIVATE -DG_LOG_DOMAIN=\"gnc.engine\")
 target_include_directories (gnc-engine
     PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR} # for iso-4217-currencies.c
+        $<$<BOOL:${HAVE_GGML}>:${GGML_INCLUDE_DIRS}>
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_BINARY_DIR}/common # for config.h

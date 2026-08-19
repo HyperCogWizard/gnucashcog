@@ -30,6 +30,7 @@ set (reports_standard_SCHEME
     standard/cash-flow.scm
     standard/cashflow-barchart.scm
     standard/category-barchart.scm
+    standard/cognitive-accounting.scm
     standard/dashboard.scm
     standard/equity-statement.scm
     standard/general-journal.scm
@@ -107,6 +108,7 @@ set(scm_rpt_std_w_exposed_generator_GUILE_DEPENDS
 set(scm_rpt_std_GUILE_DEPENDS
   ${scm_rpt_std_w_exposed_generator_GUILE_DEPENDS}
   scm-rpt-reports
+  scm-cognitive
   )
 
 gnc_add_scheme_targets(scm-reports-common

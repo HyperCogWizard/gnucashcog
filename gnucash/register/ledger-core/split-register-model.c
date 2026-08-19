@@ -29,6 +29,7 @@
 #include "dialog-utils.h"
 #include "dialog-doclink-utils.h"
 #include "gnc-engine.h"
+#include "gnc-cognitive-accounting.h"
 #include "gnc-prefs.h"
 #include "gnc-ui.h"
 #include "gnc-uri-utils.h"
@@ -749,7 +750,19 @@ gnc_split_register_get_debcred_color (VirtualLocation virt_loc,
         trans = gnc_split_register_get_trans (reg, virt_loc.vcell_loc);
 
         if (trans)
+        {
             *hatching = !xaccTransIsBalanced (trans);
+            /* Phase 6: optional cognitive PLN badge hatch (advisory only). */
+            if (!*hatching &&
+                gnc_cognitive_accounting_is_initialized () &&
+                gnc_cognitive_ui_badges_enabled ())
+            {
+                GncCognitiveBadge badge = gnc_cognitive_transaction_badge (trans);
+                if (badge == GNC_COGNITIVE_BADGE_FAIL ||
+                    badge == GNC_COGNITIVE_BADGE_WARN)
+                    *hatching = TRUE;
+            }
+        }
         else
             *hatching = FALSE;
     }

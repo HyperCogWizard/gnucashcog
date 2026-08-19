@@ -3,7 +3,7 @@
 ## Reality check
 
 Earlier drafts of this report overstated completion. This document tracks **what actually works**
-in the simulated cognitive core shipped with the engine.
+in the simulated cognitive core shipped with the engine, plus Phases 5–8 surfaces.
 
 ## Implemented (simulated core)
 
@@ -20,15 +20,42 @@ in the simulated cognitive core shipped with the engine.
 - Engine init/shutdown hooks; optional auto QOF via `GNC_COGNITIVE_AUTO=1`
 - Unit tests: `test-cognitive-accounting`, `test-tensor-network`
 
-## Partial / not done
+## Implemented (Phases 5–8)
 
-- Guile SWIG module `(gnucash cognitive)`
-- Register UI validation badges, attention heat, HTML reports
-- Import (OFX/CSV) categorization assists
-- Real OpenCog / ggml backend adapters behind a `CognitiveBackend` interface
+### Phase 5 — Guile `(gnucash cognitive)`
+- SWIG interface `bindings/cognitive.i` included from `engine.i`
+- Scheme module `bindings/guile/cognitive.scm` with friendly wrappers
+- CMake target `scm-cognitive`
+
+### Phase 6 — UI / reports
+- Transaction badges + attention heat / CSS color C API
+- HTML fragment generators for summary, attention table, validation
+- Standard report: **Cognitive Accounting** (Experimental menu)
+- Register debit/credit hatch when badges enabled (`GNC_COGNITIVE_UI` / AUTO)
+
+### Phase 7 — OpenCog CognitiveBackend adapter
+- `gnc-cognitive-backend.{h,cpp}` with simulated default
+- OpenCog selection gated on `HAVE_OPENCOG_CORE` + runtime probe
+- Book/tx sync hooks (dual-write stub when OpenCog active)
+- JSON status + health check API
+- Tests: `test-cognitive-backend`
+
+### Phase 8 — Hardening / benchmarks
+- `test-cognitive-benchmark` large-book observe/validate/ECAN timings
+- Bounded validation HTML on large books (sample ≤500 txs)
+- Re-observe stability check (atom count does not explode)
+- Env knobs for CI vs local stress sizes
+
+## Partial / future
+
+- Full live OpenCog AtomSpace push (requires linked libatomspace at runtime)
+- ggml kernels behind tensor path when `HAVE_GGML`
 - Multi-commodity pricedb conversion in all proof paths
-- Large-book benchmarks, ASAN leak gates in CI
+- Import (OFX/CSV) categorization assists driven by MOSES JSON
 
 ## Verification
 
-Prefer `ctest -R 'test-cognitive-accounting|test-tensor-network'` over presence-only scripts.
+```bash
+ctest -R 'test-cognitive' --output-on-failure
+# covers: accounting, tensor, backend, benchmark
+```

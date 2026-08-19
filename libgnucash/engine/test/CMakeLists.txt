@@ -214,6 +214,14 @@ gnc_add_test(test-cognitive-accounting test-cognitive-accounting.cpp
 gnc_add_test(test-tensor-network test-tensor-network.cpp
   gtest_engine_INCLUDES gtest_old_engine_LIBS)
 
+# Cognitive backend adapter (Phase 7)
+gnc_add_test(test-cognitive-backend test-cognitive-backend.cpp
+  gtest_engine_INCLUDES gtest_old_engine_LIBS)
+
+# Large-book cognitive benchmarks (Phase 8)
+gnc_add_test(test-cognitive-benchmark test-cognitive-benchmark.cpp
+  gtest_engine_INCLUDES gtest_old_engine_LIBS)
+
 set(test_engine_SOURCES_DIST
         gtest-gnc-euro.cpp
         gtest-gnc-int128.cpp
@@ -230,6 +238,8 @@ set(test_engine_SOURCES_DIST
         test-address.c
         test-business.c
         test-cognitive-accounting.cpp
+        test-cognitive-backend.cpp
+        test-cognitive-benchmark.cpp
         test-tensor-network.cpp
         test-commodities.cpp
         test-customer.c

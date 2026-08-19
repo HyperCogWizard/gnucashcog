@@ -280,6 +280,70 @@ void gnc_cognitive_accounting_on_transaction_commit(Transaction *transaction);
 
 /** @} */
 
+/** @name UI badges / attention heat (Phase 6) */
+/** @{ */
+
+/** Register / report validation badge for a transaction */
+typedef enum {
+    GNC_COGNITIVE_BADGE_OK = 0,
+    GNC_COGNITIVE_BADGE_WARN,
+    GNC_COGNITIVE_BADGE_FAIL,
+    GNC_COGNITIVE_BADGE_UNKNOWN
+} GncCognitiveBadge;
+
+/**
+ * Enable register hatch / badge surfacing.
+ * Default: on when GNC_COGNITIVE_AUTO=1 or GNC_COGNITIVE_UI=1.
+ */
+void gnc_cognitive_ui_set_badges_enabled(gboolean enabled);
+gboolean gnc_cognitive_ui_badges_enabled(void);
+
+/** PLN-based badge for a transaction (does not mutate the book). */
+GncCognitiveBadge gnc_cognitive_transaction_badge(const Transaction *transaction);
+
+/** Short label suitable for tooltips ("OK" / "Warn" / "Fail" / "?"). Caller g_free. */
+char* gnc_cognitive_transaction_badge_label(const Transaction *transaction);
+
+/** Attention heat in [0,1] from STI/LTI blend. */
+gdouble gnc_cognitive_account_attention_heat(const Account *account);
+
+/** CSS hex color (#RRGGBB) for heat map cells. Caller g_free. */
+char* gnc_cognitive_account_attention_css_color(const Account *account);
+
+/** Convenience STI/LTI accessors for Guile without struct marshalling. */
+gdouble gnc_ecan_account_sti(const Account *account);
+gdouble gnc_ecan_account_lti(const Account *account);
+
+/** TRUE when trial-balance proof reports balanced. */
+gboolean gnc_pln_trial_balance_balanced(const Account *root_account);
+
+/** @} */
+
+/** @name HTML fragments for Scheme reports */
+/** @{ */
+
+/** Backend + atomspace summary as a small HTML snippet. Caller g_free. */
+char* gnc_cognitive_html_summary_for_book(QofBook *book);
+
+/** Top-N attention accounts as an HTML table. Caller g_free. */
+char* gnc_cognitive_attention_table_html(QofBook *book, gint top_n);
+
+/** Recent / sample validation summary HTML. Caller g_free. */
+char* gnc_cognitive_validation_summary_html(QofBook *book);
+
+/** @} */
+
+/** @name AtomSpace stats (used by CognitiveBackend) */
+/** @{ */
+
+gboolean gnc_cognitive_atomspace_stats(guint64 *atom_count,
+                                       guint64 *account_atoms,
+                                       guint64 *transaction_atoms,
+                                       gdouble *sti_funds,
+                                       gdouble *lti_funds);
+
+/** @} */
+
 #ifdef __cplusplus
 }
 #endif

@@ -8,6 +8,7 @@
 #include "gnc-cognitive-accounting.h"
 #include "gnc-cognitive-scheme.h"
 #include "gnc-cognitive-comms.h"
+#include "gnc-cognitive-backend.h"
 #include "gnc-tensor-network.h"
 #include "Account.h"
 #include "Split.h"
@@ -195,6 +196,9 @@ gnc_cognitive_accounting_init(void)
 
     g_atomspace = std::make_unique<GncCognitiveAtomSpace>();
 
+    /* Backend selection from env before any optional dual-write hooks. */
+    gnc_cognitive_backend_apply_env_default();
+
     if (!gnc_cognitive_scheme_init())
         g_warning("Failed to initialize Scheme cognitive interface");
 
@@ -214,7 +218,15 @@ gnc_cognitive_accounting_init(void)
     g_atomspace->event_handler_id =
         qof_event_register_handler(cognitive_qof_event_handler, nullptr);
 
-    g_message("Cognitive accounting framework initialized (simulated core)");
+    /* UI badges follow AUTO or explicit GNC_COGNITIVE_UI=1 */
+    {
+        const char *ui = g_getenv("GNC_COGNITIVE_UI");
+        if ((ui && ui[0] == '1') || g_atomspace->auto_enabled)
+            gnc_cognitive_ui_set_badges_enabled(TRUE);
+    }
+
+    g_message("Cognitive accounting framework initialized (backend=%s)",
+              gnc_cognitive_backend_name());
     return TRUE;
 }
 
@@ -1442,4 +1454,269 @@ gnc_cognitive_accounting_on_transaction_commit(Transaction *transaction)
 
     gnc_cognitive_send_message(GNC_MODULE_PLN, GNC_MODULE_ECAN,
                                GNC_MSG_DATA_UPDATE, GUINT_TO_POINTER((guint)(score * 1000)));
+}
+
+/* ------------------------------------------------------------------ */
+/* AtomSpace stats                                                    */
+/* ------------------------------------------------------------------ */
+
+gboolean
+gnc_cognitive_atomspace_stats(guint64 *atom_count,
+                              guint64 *account_atoms,
+                              guint64 *transaction_atoms,
+                              gdouble *sti_funds,
+                              gdouble *lti_funds)
+{
+    if (!g_atomspace)
+        return FALSE;
+    if (atom_count)
+        *atom_count = static_cast<guint64>(g_atomspace->atoms.size());
+    if (account_atoms)
+        *account_atoms = static_cast<guint64>(g_atomspace->account_atoms.size());
+    if (transaction_atoms)
+        *transaction_atoms = static_cast<guint64>(g_atomspace->transaction_atoms.size());
+    if (sti_funds)
+        *sti_funds = g_atomspace->total_sti_funds;
+    if (lti_funds)
+        *lti_funds = g_atomspace->total_lti_funds;
+    return TRUE;
+}
+
+/* ------------------------------------------------------------------ */
+/* UI badges / attention heat                                         */
+/* ------------------------------------------------------------------ */
+
+static gboolean g_ui_badges_enabled = FALSE;
+
+void
+gnc_cognitive_ui_set_badges_enabled(gboolean enabled)
+{
+    g_ui_badges_enabled = enabled ? TRUE : FALSE;
+}
+
+gboolean
+gnc_cognitive_ui_badges_enabled(void)
+{
+    return g_ui_badges_enabled;
+}
+
+GncCognitiveBadge
+gnc_cognitive_transaction_badge(const Transaction *transaction)
+{
+    if (!transaction)
+        return GNC_COGNITIVE_BADGE_UNKNOWN;
+    if (!g_atomspace)
+        return GNC_COGNITIVE_BADGE_UNKNOWN;
+
+    GncTruthValue tv{};
+    if (!gnc_pln_validate_double_entry_tv(transaction, &tv))
+        return GNC_COGNITIVE_BADGE_UNKNOWN;
+
+    gdouble score = tv.strength * tv.confidence;
+    if (!xaccTransIsBalanced(transaction) || score < 0.45)
+        return GNC_COGNITIVE_BADGE_FAIL;
+    if (score < 0.70 || tv.confidence < 0.55)
+        return GNC_COGNITIVE_BADGE_WARN;
+    return GNC_COGNITIVE_BADGE_OK;
+}
+
+char*
+gnc_cognitive_transaction_badge_label(const Transaction *transaction)
+{
+    switch (gnc_cognitive_transaction_badge(transaction)) {
+    case GNC_COGNITIVE_BADGE_OK: return g_strdup("OK");
+    case GNC_COGNITIVE_BADGE_WARN: return g_strdup("Warn");
+    case GNC_COGNITIVE_BADGE_FAIL: return g_strdup("Fail");
+    case GNC_COGNITIVE_BADGE_UNKNOWN:
+    default: return g_strdup("?");
+    }
+}
+
+gdouble
+gnc_ecan_account_sti(const Account *account)
+{
+    return gnc_ecan_get_attention_params(account).sti;
+}
+
+gdouble
+gnc_ecan_account_lti(const Account *account)
+{
+    return gnc_ecan_get_attention_params(account).lti;
+}
+
+gdouble
+gnc_cognitive_account_attention_heat(const Account *account)
+{
+    if (!account || !g_atomspace)
+        return 0.0;
+    GncAttentionParams p = gnc_ecan_get_attention_params(account);
+    /* Soft-max style blend of STI and LTI into [0,1]. */
+    gdouble raw = 0.7 * p.sti + 0.3 * p.lti;
+    gdouble heat = 1.0 - std::exp(-raw / 80.0);
+    if (heat < 0.0) return 0.0;
+    if (heat > 1.0) return 1.0;
+    return heat;
+}
+
+char*
+gnc_cognitive_account_attention_css_color(const Account *account)
+{
+    gdouble h = gnc_cognitive_account_attention_heat(account);
+    /* Cool blue (low) -> hot amber (high) */
+    int r = static_cast<int>(40 + h * 200);
+    int g = static_cast<int>(80 + h * 100);
+    int b = static_cast<int>(200 - h * 160);
+    r = std::max(0, std::min(255, r));
+    g = std::max(0, std::min(255, g));
+    b = std::max(0, std::min(255, b));
+    return g_strdup_printf("#%02x%02x%02x", r, g, b);
+}
+
+gboolean
+gnc_pln_trial_balance_balanced(const Account *root_account)
+{
+    GncProofReport report{};
+    if (!gnc_pln_trial_balance_report(root_account, &report))
+        return FALSE;
+    return report.balanced;
+}
+
+/* ------------------------------------------------------------------ */
+/* HTML fragments for reports                                         */
+/* ------------------------------------------------------------------ */
+
+static void
+html_escape_append(std::ostringstream& ss, const char *text)
+{
+    if (!text) return;
+    for (const char *p = text; *p; ++p) {
+        switch (*p) {
+        case '&': ss << "&amp;"; break;
+        case '<': ss << "&lt;"; break;
+        case '>': ss << "&gt;"; break;
+        case '"': ss << "&quot;"; break;
+        default: ss << *p; break;
+        }
+    }
+}
+
+char*
+gnc_cognitive_html_summary_for_book(QofBook *book)
+{
+    std::ostringstream ss;
+    ss << "<div class=\"gnc-cognitive-summary\">";
+    if (!gnc_cognitive_accounting_is_initialized()) {
+        ss << "<p>Cognitive accounting is not initialized.</p></div>";
+        return g_strdup(ss.str().c_str());
+    }
+
+    if (book)
+        gnc_cognitive_backend_sync_book(book);
+
+    char *status = gnc_cognitive_backend_status_json();
+    ss << "<p><b>Backend:</b> ";
+    html_escape_append(ss, gnc_cognitive_backend_name());
+    ss << " &nbsp; <b>Health:</b> "
+       << (gnc_cognitive_backend_health_check() ? "OK" : "DEGRADED")
+       << "</p>";
+    ss << "<pre class=\"gnc-cognitive-status\">";
+    html_escape_append(ss, status ? status : "{}");
+    ss << "</pre></div>";
+    g_free(status);
+    return g_strdup(ss.str().c_str());
+}
+
+char*
+gnc_cognitive_attention_table_html(QofBook *book, gint top_n)
+{
+    if (top_n <= 0)
+        top_n = 10;
+    if (top_n > 100)
+        top_n = 100;
+
+    std::ostringstream ss;
+    ss << "<table class=\"gnc-cognitive-attention\">"
+       << "<thead><tr><th>Account</th><th>STI</th><th>LTI</th>"
+       << "<th>Heat</th><th>Color</th></tr></thead><tbody>";
+
+    if (!gnc_cognitive_accounting_is_initialized()) {
+        ss << "<tr><td colspan=\"5\">Cognitive accounting not initialized.</td></tr>"
+           << "</tbody></table>";
+        return g_strdup(ss.str().c_str());
+    }
+
+    if (book)
+        gnc_cognitive_accounting_observe_book(book);
+
+    std::vector<Account*> buf(static_cast<size_t>(top_n), nullptr);
+    gint n = gnc_ecan_top_accounts(buf.data(), top_n);
+    for (gint i = 0; i < n; ++i) {
+        Account *acc = buf[static_cast<size_t>(i)];
+        if (!acc) continue;
+        const char *name = xaccAccountGetName(acc);
+        GncAttentionParams p = gnc_ecan_get_attention_params(acc);
+        gdouble heat = gnc_cognitive_account_attention_heat(acc);
+        char *color = gnc_cognitive_account_attention_css_color(acc);
+        ss << "<tr><td>";
+        html_escape_append(ss, name ? name : "(unnamed)");
+        ss << "</td><td>" << p.sti << "</td><td>" << p.lti
+           << "</td><td>" << heat
+           << "</td><td style=\"background:" << (color ? color : "#ccc")
+           << "\">&nbsp;&nbsp;&nbsp;</td></tr>";
+        g_free(color);
+    }
+    if (n == 0)
+        ss << "<tr><td colspan=\"5\">No attention-ranked accounts yet.</td></tr>";
+    ss << "</tbody></table>";
+    return g_strdup(ss.str().c_str());
+}
+
+char*
+gnc_cognitive_validation_summary_html(QofBook *book)
+{
+    std::ostringstream ss;
+    ss << "<div class=\"gnc-cognitive-validation\">";
+
+    if (!gnc_cognitive_accounting_is_initialized()) {
+        ss << "<p>Cognitive accounting not initialized.</p></div>";
+        return g_strdup(ss.str().c_str());
+    }
+
+    Account *root = book ? gnc_book_get_root_account(book) : nullptr;
+    if (root) {
+        GncProofReport report{};
+        if (gnc_pln_trial_balance_report(root, &report)) {
+            ss << "<p><b>Trial balance proof:</b> "
+               << (report.balanced ? "balanced" : "imbalanced")
+               << " (strength=" << report.strength
+               << ", confidence=" << report.confidence << ")</p>";
+        }
+    }
+
+    /* Sample recent mapped transactions for badge histogram */
+    gint ok = 0, warn = 0, fail = 0, unknown = 0, total = 0;
+    if (g_atomspace) {
+        for (const auto &kv : g_atomspace->transaction_atoms) {
+            const Transaction *tx = kv.first;
+            if (!tx) continue;
+            ++total;
+            switch (gnc_cognitive_transaction_badge(tx)) {
+            case GNC_COGNITIVE_BADGE_OK: ++ok; break;
+            case GNC_COGNITIVE_BADGE_WARN: ++warn; break;
+            case GNC_COGNITIVE_BADGE_FAIL: ++fail; break;
+            default: ++unknown; break;
+            }
+            if (total >= 500) break; /* bound work for large books */
+        }
+    }
+    ss << "<p><b>Transaction badges</b> (sample up to 500 mapped): "
+       << "OK=" << ok << ", Warn=" << warn << ", Fail=" << fail
+       << ", ?=" << unknown << ", n=" << total << "</p>";
+
+    char *moses = gnc_moses_last_strategies_json();
+    ss << "<p><b>MOSES strategies:</b></p><pre>";
+    html_escape_append(ss, moses ? moses : "[]");
+    ss << "</pre></div>";
+    g_free(moses);
+    return g_strdup(ss.str().c_str());
 }

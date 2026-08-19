@@ -5,6 +5,7 @@ set_local_dist(bindings_DIST_local
     CMakeLists.txt
     app-utils.i
     business-core.i
+    cognitive.i
     core-utils.i
     engine.i
     engine-common.i)

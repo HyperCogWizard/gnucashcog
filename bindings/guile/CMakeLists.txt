@@ -143,6 +143,10 @@ set (engine_SCHEME_2
     utilities.scm
 )
 
+set (cognitive_SCHEME
+    cognitive.scm
+)
+
 set(BACKEND_DEPENDS gncmod-backend-xml)
 if (WITH_SQL)
     list(APPEND BACKEND_DEPENDS gncmod-backend-dbi)
@@ -172,13 +176,19 @@ gnc_add_scheme_targets(scm-engine-2
     DEPENDS "scm-engine-1;${GUILE_DEPENDS}"
     MAKE_LINKS)
 
+# (gnucash cognitive) — Phase 5 Guile surface over SWIG cognitive API
+gnc_add_scheme_targets(scm-cognitive
+    SOURCES "${cognitive_SCHEME}"
+    OUTPUT_DIR gnucash
+    DEPENDS "scm-engine-1;${GUILE_DEPENDS}"
+    MAKE_LINKS)
 
 gnc_add_scheme_targets(scm-options
   SOURCES options.scm
   OUTPUT_DIR gnucash
   DEPENDS "scm-engine-2;scm-core-utils;${GUILE_DEPENDS}")
 
-add_custom_target(scm-engine ALL DEPENDS scm-options scm-engine-2 scm-engine-1 scm-engine-0)
+add_custom_target(scm-engine ALL DEPENDS scm-options scm-engine-2 scm-engine-1 scm-engine-0 scm-cognitive)
 
 set (app_utils_SCHEME_1
         c-interface.scm
@@ -230,6 +240,7 @@ set_local_dist(guile_DIST_local
     ${engine_SCHEME_0}
     ${engine_SCHEME_1}
     ${engine_SCHEME_2}
+    ${cognitive_SCHEME}
     ${app_utils_SCHEME_1}
     ${app_utils_SCHEME_1a}
     ${app_utils_SCHEME_1b}

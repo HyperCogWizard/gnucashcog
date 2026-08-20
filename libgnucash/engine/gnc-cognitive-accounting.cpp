@@ -1,905 +1,1200 @@
 /********************************************************************\
- * gnc-cognitive-accounting.cpp -- OpenCog integration implementation *
- * Copyright (C) 2024 GnuCash Cognitive Engine                       *
- *                                                                    *
- * This program is free software; you can redistribute it and/or      *
- * modify it under the terms of the GNU General Public License as     *
- * published by the Free Software Foundation; either version 2 of     *
- * the License, or (at your option) any later version.                *
- *                                                                    *
- * This program is distributed in the hope that it will be useful,    *
- * but WITHOUT ANY WARRANTY; without even the implied warranty of     *
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the      *
- * GNU General Public License for more details.                       *
- *********************************************************************/
+ * gnc-cognitive-accounting.cpp -- Simulated cognitive accounting   *
+ * Copyright (C) 2024-2026 GnuCash Cognitive Engine                 *
+\********************************************************************/
+
+#include <config.h>
 
 #include "gnc-cognitive-accounting.h"
 #include "gnc-cognitive-scheme.h"
 #include "gnc-cognitive-comms.h"
+#include "gnc-cognitive-backend.h"
 #include "gnc-tensor-network.h"
 #include "Account.h"
 #include "Split.h"
 #include "Transaction.h"
 #include "gnc-numeric.h"
 #include "qof.h"
-#include <glib.h>
+#include "qofevent.h"
+#include "qofinstance-p.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
+#include <sstream>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
-//<<<<<<< copilot/fix-1-3
-/** Enhanced OpenCog-style AtomSpace implementation for cognitive accounting */
-//=======
-// OpenCog integration headers (conditional compilation)
-#ifdef HAVE_OPENCOG_COGUTIL
-#include <opencog/util/Config.h>
-#include <opencog/util/Logger.h>
-#endif
+/* ------------------------------------------------------------------ */
+/* In-process AtomSpace model                                         */
+/* ------------------------------------------------------------------ */
 
-#ifdef HAVE_OPENCOG_ATOMSPACE
-#include <opencog/atomspace/AtomSpace.h>
-#include <opencog/atoms/base/Node.h>
-#include <opencog/atoms/base/Link.h>
-#include <opencog/atoms/truthvalue/TruthValue.h>
-#include <opencog/atoms/truthvalue/SimpleTruthValue.h>
-using namespace opencog;
-#endif
-
-#ifdef HAVE_OPENCOG_ATTENTION
-#include <opencog/attention/AttentionBank.h>
-#include <opencog/attention/AttentionValue.h>
-#endif
-
-#ifdef HAVE_OPENCOG_PLN
-#include <opencog/pln/PLNModule.h>
-#include <opencog/pln/BackwardChainer.h>
-#include <opencog/pln/ForwardChainer.h>
-#endif
-
-#ifdef HAVE_OPENCOG_URE
-#include <opencog/ure/Rule.h>
-#include <opencog/ure/UREModule.h>
-#endif
-
-#ifdef HAVE_OPENCOG_ASMOSES
-#include <opencog/asmoses/moses/main/moses_main.h>
-#endif
-
-#ifdef HAVE_OPENCOG_COGSERVER
-#include <opencog/cogserver/server/CogServer.h>
-#endif
-
-/** Cognitive AtomSpace implementation using OpenCog or simulation */
-//>>>>>>> stable
-struct GncCognitiveAtomSpace {
-#ifdef HAVE_OPENCOG_ATOMSPACE
-    // Real OpenCog AtomSpace integration
-    AtomSpacePtr atomspace;
-    
-    GncCognitiveAtomSpace() {
-        atomspace = std::make_shared<AtomSpace>();
-        g_message("Initialized real OpenCog AtomSpace");
-    }
-    
-    guint64 create_atom(GncAtomType type, const std::string& name) {
-        Handle handle;
-        
-        switch(type) {
-            case GNC_ATOM_ACCOUNT_CONCEPT:
-                handle = atomspace->add_node(CONCEPT_NODE, name);
-                break;
-            case GNC_ATOM_ACCOUNT_CATEGORY:
-                handle = atomspace->add_node(CONCEPT_NODE, name);
-                break;
-            case GNC_ATOM_ACCOUNT_HIERARCHY:
-                // Will be created as a link between atoms
-                handle = Handle::UNDEFINED;
-                break;
-            case GNC_ATOM_ACCOUNT_BALANCE:
-                handle = atomspace->add_node(PREDICATE_NODE, name);
-                break;
-            case GNC_ATOM_TRANSACTION_RULE:
-                handle = atomspace->add_node(PREDICATE_NODE, name);
-                break;
-            case GNC_ATOM_DOUBLE_ENTRY_RULE:
-                handle = atomspace->add_node(PREDICATE_NODE, name);
-                break;
-            case GNC_ATOM_N_ENTRY_RULE:
-                handle = atomspace->add_node(PREDICATE_NODE, name);
-                break;
-            default:
-                handle = atomspace->add_node(CONCEPT_NODE, name);
-        }
-        
-        if (handle != Handle::UNDEFINED) {
-            // Store mapping from handle to GncAtomHandle
-            guint64 gnc_handle = reinterpret_cast<guint64>(handle.value());
-            opencog_handles[gnc_handle] = handle;
-            handle_types[gnc_handle] = type;
-            handle_names[gnc_handle] = name;
-            
-            // Initialize attention parameters
-            GncAttentionParams params = {0.5, 0.5, 0.1, 0.0};
-            attention_params[gnc_handle] = params;
-            
-            return gnc_handle;
-        }
-        return 0;
-    }
-    
-    guint64 create_hierarchy_link(guint64 parent_handle, guint64 child_handle) {
-        auto parent_it = opencog_handles.find(parent_handle);
-        auto child_it = opencog_handles.find(child_handle);
-        
-        if (parent_it != opencog_handles.end() && child_it != opencog_handles.end()) {
-            Handle link_handle = atomspace->add_link(INHERITANCE_LINK, 
-                                                   child_it->second, 
-                                                   parent_it->second);
-            if (link_handle != Handle::UNDEFINED) {
-                guint64 gnc_link_handle = reinterpret_cast<guint64>(link_handle.value());
-                opencog_handles[gnc_link_handle] = link_handle;
-                handle_types[gnc_link_handle] = GNC_ATOM_ACCOUNT_HIERARCHY;
-                
-                return gnc_link_handle;
-            }
-        }
-        return 0;
-    }
-    
-    // Mapping between GnuCash handles and OpenCog handles
-    std::map<guint64, Handle> opencog_handles;
-    std::map<guint64, GncAtomType> handle_types;
-    std::map<guint64, std::string> handle_names;
-    std::map<guint64, GncAttentionParams> attention_params;
-    std::map<const Account*, guint64> account_atoms;
-    
-#else
-    // Fallback simulated implementation
-    std::map<guint64, GncAtomType> atom_types;
-    std::map<guint64, std::string> atom_names;
-    std::map<guint64, GncAttentionParams> attention_params;
-    std::map<guint64, std::pair<gdouble, gdouble>> truth_values; // strength, confidence
-    std::map<const Account*, guint64> account_atoms;
-    std::vector<GncCognitiveMessage> message_queue;
-    std::map<std::string, GncCognitiveMessageHandler> message_handlers;
-    guint64 next_handle;
-    
-//<<<<<<< copilot/fix-1-3
-    /* ECAN fund management */
-    gdouble total_sti_funds;
-    gdouble total_lti_funds;
-    gdouble attention_decay_rate;
-    
-    GncCognitiveAtomSpace() : next_handle(1000), total_sti_funds(1000.0), 
-                             total_lti_funds(1000.0), attention_decay_rate(0.01) {}
-//=======
-//    GncCognitiveAtomSpace() : next_handle(1000) {
-//        g_message("Initialized simulated cognitive AtomSpace (OpenCog not available)");
-    }
-//>>>>>>> stable
-    
-    guint64 create_atom(GncAtomType type, const std::string& name) {
-        guint64 handle = next_handle++;
-        atom_types[handle] = type;
-        atom_names[handle] = name;
-        
-        // Initialize OpenCog-style attention parameters
-        GncAttentionParams params = {};
-        params.sti = 0.0;
-        params.sti_funds = 10.0;
-        params.lti = 0.0; 
-        params.lti_funds = 10.0;
-        params.vlti = 0.0;
-        params.confidence = 0.5;
-        params.strength = 0.5;
-        params.activity_level = 0.0;
-        params.wage = 1.0;
-        params.rent = 0.1;
-        
-        // Legacy compatibility
-        params.importance = 0.5;
-        params.attention_value = 0.1;
-        
-        attention_params[handle] = params;
-        
-        // Initialize truth value
-        truth_values[handle] = std::make_pair(0.5, 0.5);
-        
-        return handle;
-    }
-    
-//<<<<<<< copilot/fix-1-3
-    void distribute_sti_funds() {
-        // Simple STI fund distribution algorithm
-        if (attention_params.empty()) return;
-        
-        gdouble fund_per_atom = total_sti_funds / attention_params.size();
-        for (auto& pair : attention_params) {
-            pair.second.sti_funds = fund_per_atom;
-        }
-    }
-    
-    void apply_attention_decay() {
-        // Apply attention decay to all atoms
-        for (auto& pair : attention_params) {
-            auto& params = pair.second;
-            params.sti *= (1.0 - attention_decay_rate);
-            params.lti *= (1.0 - attention_decay_rate * 0.1); // LTI decays slower
-            
-            // Collect rent
-            if (params.sti > params.rent) {
-                params.sti -= params.rent;
-                total_sti_funds += params.rent;
-            }
-        }
-    }
-//=======
-    guint64 create_hierarchy_link(guint64 parent_handle, guint64 child_handle) {
-        std::string link_name = "HierarchyLink:" + 
-                               std::to_string(parent_handle) + "->" + 
-                               std::to_string(child_handle);
-        return create_atom(GNC_ATOM_ACCOUNT_HIERARCHY, link_name);
-    }
-#endif
-//>>>>>>> stable
+struct GncCognitiveAtom {
+    GncAtomHandle handle = 0;
+    GncAtomType type = GNC_ATOM_CONCEPT_NODE;
+    std::string name;
+    std::vector<GncAtomHandle> outgoing;
+    std::vector<GncAtomHandle> incoming;
+    GncAttentionParams attention{};
+    gdouble tv_strength = 0.5;
+    gdouble tv_confidence = 0.5;
 };
 
-static std::unique_ptr<GncCognitiveAtomSpace> g_atomspace = nullptr;
+struct GncCognitiveAtomSpace {
+    std::unordered_map<GncAtomHandle, GncCognitiveAtom> atoms;
+    std::map<const Account*, GncAtomHandle> account_atoms;
+    std::map<const Transaction*, GncAtomHandle> transaction_atoms;
+    std::map<const Transaction*, gdouble> last_validation;
+    std::map<std::string, GncCognitiveMessageHandler> message_handlers;
+    std::vector<GncCognitiveAtomMessage> message_queue;
+    std::string last_moses_json = "[]";
+    GncAtomHandle next_handle = 1000;
+    gdouble total_sti_funds = 1000.0;
+    gdouble total_lti_funds = 1000.0;
+    gdouble attention_decay_rate = 0.01;
+    gint event_handler_id = 0;
+    gboolean auto_enabled = FALSE;
 
-/* Cognitive account type storage using KVP */
+    GncCognitiveAtomSpace()
+    {
+        const char *env = g_getenv("GNC_COGNITIVE_AUTO");
+        if (env && env[0] == '1')
+            auto_enabled = TRUE;
+    }
+
+    GncAtomHandle create_atom(GncAtomType type, const std::string& name,
+                              const std::vector<GncAtomHandle>& outgoing = {})
+    {
+        GncAtomHandle h = next_handle++;
+        GncCognitiveAtom atom;
+        atom.handle = h;
+        atom.type = type;
+        atom.name = name;
+        atom.outgoing = outgoing;
+        atom.attention.sti = 0.0;
+        atom.attention.sti_funds = 10.0;
+        atom.attention.lti = 0.0;
+        atom.attention.lti_funds = 10.0;
+        atom.attention.vlti = 0.0;
+        atom.attention.confidence = 0.5;
+        atom.attention.strength = 0.5;
+        atom.attention.activity_level = 0.0;
+        atom.attention.wage = 1.0;
+        atom.attention.rent = 0.1;
+        atom.attention.importance = 0.5;
+        atom.attention.attention_value = 0.1;
+        atom.tv_strength = 0.5;
+        atom.tv_confidence = 0.5;
+        atoms[h] = atom;
+
+        for (GncAtomHandle out : outgoing) {
+            auto it = atoms.find(out);
+            if (it != atoms.end())
+                it->second.incoming.push_back(h);
+        }
+        return h;
+    }
+
+    GncCognitiveAtom* get(GncAtomHandle h)
+    {
+        auto it = atoms.find(h);
+        return it == atoms.end() ? nullptr : &it->second;
+    }
+
+    const GncCognitiveAtom* get(GncAtomHandle h) const
+    {
+        auto it = atoms.find(h);
+        return it == atoms.end() ? nullptr : &it->second;
+    }
+
+    void set_tv(GncAtomHandle h, gdouble s, gdouble c)
+    {
+        auto *a = get(h);
+        if (!a) return;
+        a->tv_strength = CLAMP(s, 0.0, 1.0);
+        a->tv_confidence = CLAMP(c, 0.0, 1.0);
+        a->attention.strength = a->tv_strength;
+        a->attention.confidence = a->tv_confidence;
+    }
+
+    void refresh_legacy_attention(GncAttentionParams& p)
+    {
+        p.importance = (p.sti + p.lti * 10.0) / 11.0;
+        p.attention_value = std::min(1.0, (p.sti + p.lti + p.vlti * 100.0) / 200.0);
+        if (p.attention_value < 0.0) p.attention_value = 0.0;
+    }
+};
+
+static std::unique_ptr<GncCognitiveAtomSpace> g_atomspace;
+
 static const char* COGNITIVE_TYPE_KEY = "cognitive-accounting-type";
 
-/********************************************************************\
- * OpenCog-style AtomSpace Operations                                *
-\********************************************************************/
-
-GncAtomHandle gnc_atomspace_create_concept_node(const char* name)
+static gdouble clamp01(gdouble v)
 {
-    g_return_val_if_fail(name != nullptr, 0);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return 0;
-    }
-    
-    return g_atomspace->create_atom(GNC_ATOM_CONCEPT_NODE, std::string(name));
+    return std::max(0.0, std::min(1.0, v));
 }
 
-GncAtomHandle gnc_atomspace_create_predicate_node(const char* name)
+static std::string sanitize_scheme_string(const char* raw)
 {
-    g_return_val_if_fail(name != nullptr, 0);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return 0;
+    std::string out;
+    if (!raw) return out;
+    for (const char* p = raw; *p; ++p) {
+        char c = *p;
+        if (c == '\\' || c == '"')
+            out.push_back('\\');
+        if (static_cast<unsigned char>(c) >= 32 && c != 127)
+            out.push_back(c);
+        else
+            out.push_back(' ');
     }
-    
-    return g_atomspace->create_atom(GNC_ATOM_PREDICATE_NODE, std::string(name));
+    return out;
 }
 
-GncAtomHandle gnc_atomspace_create_evaluation_link(GncAtomHandle predicate_atom,
-                                                   GncAtomHandle account_atom,
-                                                   gdouble truth_value)
-{
-    g_return_val_if_fail(predicate_atom != 0, 0);
-    g_return_val_if_fail(account_atom != 0, 0);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return 0;
-    }
-    
-    std::string link_name = "EvaluationLink:" + 
-                           std::to_string(predicate_atom) + ":" + 
-                           std::to_string(account_atom);
-    
-    GncAtomHandle link_handle = g_atomspace->create_atom(GNC_ATOM_EVALUATION_LINK, link_name);
-    
-    // Set truth value for the evaluation
-    gnc_atomspace_set_truth_value(link_handle, truth_value, 0.9);
-    
-    return link_handle;
-}
+/* ------------------------------------------------------------------ */
+/* QOF event integration                                              */
+/* ------------------------------------------------------------------ */
 
-GncAtomHandle gnc_atomspace_create_inheritance_link(GncAtomHandle child_atom,
-                                                    GncAtomHandle parent_atom)
+static void
+cognitive_qof_event_handler(QofInstance *entity, QofEventId event_type,
+                            gpointer user_data, gpointer event_data)
 {
-    g_return_val_if_fail(child_atom != 0, 0);
-    g_return_val_if_fail(parent_atom != 0, 0);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return 0;
-    }
-    
-    std::string link_name = "InheritanceLink:" + 
-                           std::to_string(child_atom) + "->" + 
-                           std::to_string(parent_atom);
-    
-    return g_atomspace->create_atom(GNC_ATOM_INHERITANCE_LINK, link_name);
-}
-
-void gnc_atomspace_set_truth_value(GncAtomHandle atom_handle, 
-                                   gdouble strength, gdouble confidence)
-{
-    g_return_if_fail(atom_handle != 0);
-    g_return_if_fail(strength >= 0.0 && strength <= 1.0);
-    g_return_if_fail(confidence >= 0.0 && confidence <= 1.0);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
+    (void)user_data;
+    (void)event_data;
+    if (!g_atomspace || !g_atomspace->auto_enabled)
         return;
-    }
-    
-    g_atomspace->truth_values[atom_handle] = std::make_pair(strength, confidence);
-    
-    // Also update attention parameters
-    auto it = g_atomspace->attention_params.find(atom_handle);
-    if (it != g_atomspace->attention_params.end()) {
-        it->second.strength = strength;
-        it->second.confidence = confidence;
+
+    if (GNC_IS_TRANSACTION(entity)) {
+        Transaction *tx = GNC_TRANSACTION(entity);
+        if (event_type == QOF_EVENT_MODIFY || event_type == QOF_EVENT_CREATE) {
+            if (!xaccTransIsOpen(tx))
+                gnc_cognitive_accounting_on_transaction_commit(tx);
+        }
+    } else if (GNC_IS_ACCOUNT(entity)) {
+        Account *acc = GNC_ACCOUNT(entity);
+        if (event_type == QOF_EVENT_DESTROY)
+            gnc_atomspace_remove_account(acc);
+        else if (event_type == QOF_EVENT_CREATE || event_type == QOF_EVENT_MODIFY)
+            gnc_account_to_atomspace(acc);
     }
 }
 
-gboolean gnc_atomspace_get_truth_value(GncAtomHandle atom_handle,
-                                       gdouble* strength, gdouble* confidence)
-{
-    g_return_val_if_fail(atom_handle != 0, FALSE);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return FALSE;
-    }
-    
-    auto it = g_atomspace->truth_values.find(atom_handle);
-    if (it != g_atomspace->truth_values.end()) {
-        if (strength) *strength = it->second.first;
-        if (confidence) *confidence = it->second.second;
-        return TRUE;
-    }
-    
-    return FALSE;
-}
+/* ------------------------------------------------------------------ */
+/* Lifecycle                                                          */
+/* ------------------------------------------------------------------ */
 
-/********************************************************************\
- * AtomSpace Integration Functions                                   *
-\********************************************************************/
-
-gboolean gnc_cognitive_accounting_init(void)
+gboolean
+gnc_cognitive_accounting_init(void)
 {
     if (g_atomspace) {
-        g_warning("Cognitive accounting already initialized");
-        return FALSE;
+        g_message("Cognitive accounting already initialized");
+        return TRUE;
     }
-    
+
     g_atomspace = std::make_unique<GncCognitiveAtomSpace>();
-    
-#ifdef HAVE_OPENCOG_COGUTIL
-    // Initialize OpenCog logging
-    opencog::logger().set_level(opencog::Logger::INFO);
-    opencog::logger().set_component("GnuCash-Cognitive");
-#endif
 
-#ifdef HAVE_OPENCOG_COGSERVER
-    // Initialize CogServer for network access (optional)
-    try {
-        // CogServer initialization would go here if needed
-        g_message("CogServer integration available");
-    } catch (const std::exception& e) {
-        g_warning("CogServer initialization failed: %s", e.what());
-    }
-#endif
+    /* Backend selection from env before any optional dual-write hooks. */
+    gnc_cognitive_backend_apply_env_default();
 
-    // Initialize Scheme-based cognitive representations
-    if (!gnc_cognitive_scheme_init()) {
+    if (!gnc_cognitive_scheme_init())
         g_warning("Failed to initialize Scheme cognitive interface");
-    }
-    
-    // Initialize inter-module communication protocols
-    if (!gnc_cognitive_comms_init()) {
+
+    if (!gnc_cognitive_comms_init())
         g_warning("Failed to initialize cognitive communication hub");
-    }
-    
-    // Initialize distributed tensor network
-    if (!gnc_tensor_network_init()) {
-        g_warning("Failed to initialize tensor network - using fallback implementation");
-    } else {
-        g_message("Distributed ggml tensor network initialized successfully");
-    }
-    
-    // Register core modules with communication hub
+
+    if (!gnc_tensor_network_init())
+        g_warning("Failed to initialize tensor network");
+
     gnc_cognitive_register_module(GNC_MODULE_ATOMSPACE);
     gnc_cognitive_register_module(GNC_MODULE_PLN);
     gnc_cognitive_register_module(GNC_MODULE_ECAN);
     gnc_cognitive_register_module(GNC_MODULE_MOSES);
     gnc_cognitive_register_module(GNC_MODULE_URE);
     gnc_cognitive_register_module(GNC_MODULE_SCHEME);
-    
-#ifdef HAVE_OPENCOG_COGSERVER
-    gnc_cognitive_register_module(GNC_MODULE_COGSERVER);
-#endif
-    
-    g_message("Cognitive accounting framework initialized with OpenCog integration");
+
+    g_atomspace->event_handler_id =
+        qof_event_register_handler(cognitive_qof_event_handler, nullptr);
+
+    /* UI badges follow AUTO or explicit GNC_COGNITIVE_UI=1 */
+    {
+        const char *ui = g_getenv("GNC_COGNITIVE_UI");
+        if ((ui && ui[0] == '1') || g_atomspace->auto_enabled)
+            gnc_cognitive_ui_set_badges_enabled(TRUE);
+    }
+
+    g_message("Cognitive accounting framework initialized (backend=%s)",
+              gnc_cognitive_backend_name());
     return TRUE;
 }
 
-void gnc_cognitive_accounting_shutdown(void)
+void
+gnc_cognitive_accounting_shutdown(void)
 {
     if (!g_atomspace) {
         g_warning("Cognitive accounting not initialized");
         return;
     }
-    
-    // Shutdown communication protocols
+
+    if (g_atomspace->event_handler_id)
+        qof_event_unregister_handler(g_atomspace->event_handler_id);
+
     gnc_cognitive_comms_shutdown();
-    
-    // Shutdown tensor network
     gnc_tensor_network_shutdown();
-    
     g_atomspace.reset();
-    g_message("Cognitive accounting AtomSpace shutdown");
+    g_message("Cognitive accounting shutdown complete");
 }
 
-GncAtomHandle gnc_account_to_atomspace(const Account *account)
+gboolean
+gnc_cognitive_accounting_is_initialized(void)
 {
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return 0;
-    }
-    
+    return g_atomspace != nullptr;
+}
+
+void
+gnc_cognitive_accounting_set_auto_enabled(gboolean enabled)
+{
+    if (g_atomspace)
+        g_atomspace->auto_enabled = enabled;
+}
+
+gboolean
+gnc_cognitive_accounting_get_auto_enabled(void)
+{
+    return g_atomspace ? g_atomspace->auto_enabled : FALSE;
+}
+
+/* ------------------------------------------------------------------ */
+/* AtomSpace primitives                                               */
+/* ------------------------------------------------------------------ */
+
+GncAtomHandle
+gnc_atomspace_create_concept_node(const char* name)
+{
+    g_return_val_if_fail(name != nullptr, 0);
+    if (!g_atomspace) return 0;
+    return g_atomspace->create_atom(GNC_ATOM_CONCEPT_NODE, name);
+}
+
+GncAtomHandle
+gnc_atomspace_create_predicate_node(const char* name)
+{
+    g_return_val_if_fail(name != nullptr, 0);
+    if (!g_atomspace) return 0;
+    return g_atomspace->create_atom(GNC_ATOM_PREDICATE_NODE, name);
+}
+
+GncAtomHandle
+gnc_atomspace_create_evaluation_link(GncAtomHandle predicate_atom,
+                                     GncAtomHandle account_atom,
+                                     gdouble truth_value)
+{
+    g_return_val_if_fail(predicate_atom != 0 && account_atom != 0, 0);
+    if (!g_atomspace) return 0;
+    std::string name = "EvaluationLink:" + std::to_string(predicate_atom) +
+                       ":" + std::to_string(account_atom);
+    GncAtomHandle h = g_atomspace->create_atom(
+        GNC_ATOM_EVALUATION_LINK, name, {predicate_atom, account_atom});
+    g_atomspace->set_tv(h, clamp01(truth_value), 0.9);
+    return h;
+}
+
+GncAtomHandle
+gnc_atomspace_create_inheritance_link(GncAtomHandle child_atom,
+                                      GncAtomHandle parent_atom)
+{
+    g_return_val_if_fail(child_atom != 0 && parent_atom != 0, 0);
+    if (!g_atomspace) return 0;
+    std::string name = "InheritanceLink:" + std::to_string(child_atom) +
+                       "->" + std::to_string(parent_atom);
+    return g_atomspace->create_atom(
+        GNC_ATOM_INHERITANCE_LINK, name, {child_atom, parent_atom});
+}
+
+void
+gnc_atomspace_set_truth_value(GncAtomHandle atom_handle,
+                              gdouble strength, gdouble confidence)
+{
+    g_return_if_fail(atom_handle != 0);
+    if (!g_atomspace) return;
+    g_atomspace->set_tv(atom_handle, strength, confidence);
+}
+
+gboolean
+gnc_atomspace_get_truth_value(GncAtomHandle atom_handle,
+                              gdouble* strength, gdouble* confidence)
+{
+    g_return_val_if_fail(atom_handle != 0, FALSE);
+    if (!g_atomspace) return FALSE;
+    const auto *a = g_atomspace->get(atom_handle);
+    if (!a) return FALSE;
+    if (strength) *strength = a->tv_strength;
+    if (confidence) *confidence = a->tv_confidence;
+    return TRUE;
+}
+
+GncAtomType
+gnc_atomspace_get_atom_type(GncAtomHandle atom_handle)
+{
+    if (!g_atomspace) return GNC_ATOM_CONCEPT_NODE;
+    const auto *a = g_atomspace->get(atom_handle);
+    return a ? a->type : GNC_ATOM_CONCEPT_NODE;
+}
+
+const char*
+gnc_atomspace_get_atom_name(GncAtomHandle atom_handle)
+{
+    if (!g_atomspace) return nullptr;
+    const auto *a = g_atomspace->get(atom_handle);
+    return a ? a->name.c_str() : nullptr;
+}
+
+guint
+gnc_atomspace_get_outgoing_size(GncAtomHandle atom_handle)
+{
+    if (!g_atomspace) return 0;
+    const auto *a = g_atomspace->get(atom_handle);
+    return a ? static_cast<guint>(a->outgoing.size()) : 0;
+}
+
+GncAtomHandle
+gnc_atomspace_get_outgoing(GncAtomHandle atom_handle, guint index)
+{
+    if (!g_atomspace) return 0;
+    const auto *a = g_atomspace->get(atom_handle);
+    if (!a || index >= a->outgoing.size()) return 0;
+    return a->outgoing[index];
+}
+
+guint
+gnc_atomspace_get_incoming_size(GncAtomHandle atom_handle)
+{
+    if (!g_atomspace) return 0;
+    const auto *a = g_atomspace->get(atom_handle);
+    return a ? static_cast<guint>(a->incoming.size()) : 0;
+}
+
+GncAtomHandle
+gnc_atomspace_get_incoming(GncAtomHandle atom_handle, guint index)
+{
+    if (!g_atomspace) return 0;
+    const auto *a = g_atomspace->get(atom_handle);
+    if (!a || index >= a->incoming.size()) return 0;
+    return a->incoming[index];
+}
+
+GncAtomHandle
+gnc_atomspace_create_hierarchy_link(GncAtomHandle parent_atom,
+                                    GncAtomHandle child_atom)
+{
+    /* API historically takes parent then child; inheritance is child->parent */
+    return gnc_atomspace_create_inheritance_link(child_atom, parent_atom);
+}
+
+GncAtomHandle
+gnc_account_to_atomspace(const Account *account)
+{
     g_return_val_if_fail(account != nullptr, 0);
-    
-    // Check if account already has an atom
-    auto it = g_atomspace->account_atoms.find(account);
-    if (it != g_atomspace->account_atoms.end()) {
-        return it->second;
-    }
-    
-    // Create account concept node using OpenCog-style approach
-    std::string account_name = xaccAccountGetName(account) ? 
-                              xaccAccountGetName(account) : "unnamed_account";
-    
-    GncAtomHandle concept_handle = gnc_atomspace_create_concept_node(
-        ("Account:" + account_name).c_str()
-    );
-    
-    // Store mapping
-    g_atomspace->account_atoms[account] = concept_handle;
-    
-//<<<<<<< copilot/fix-1-3
-    // Create category concept node based on account type
-//=======
-    // Register Scheme-based hypergraph patterns
-    gnc_scheme_register_account_patterns(const_cast<Account*>(account));
-    
-    // Create category atom based on account type
-//>>>>>>> stable
-    GNCAccountType acct_type = xaccAccountGetType(account);
-    std::string category_name = "Category:" + std::string(xaccAccountGetTypeStr(acct_type));
-    
-    GncAtomHandle category_handle = gnc_atomspace_create_concept_node(category_name.c_str());
-    
-    // Create inheritance link: Account inherits from Category
-    gnc_atomspace_create_inheritance_link(concept_handle, category_handle);
-    
-    // Create balance predicate and evaluation
-    GncAtomHandle balance_predicate = gnc_atomspace_create_predicate_node("hasBalance");
-    gnc_numeric current_balance = xaccAccountGetBalance(account);
-    gdouble balance_value = gnc_numeric_to_double(current_balance);
-    
-    // Normalize balance for truth value (simple approach)
-    gdouble normalized_balance = (balance_value >= 0) ? 
-        std::min(1.0, balance_value / 1000.0) : 0.0;
-    
-    gnc_atomspace_create_evaluation_link(balance_predicate, concept_handle, normalized_balance);
-    
-    // Create hierarchy link if account has parent
-    Account *parent = gnc_account_get_parent(account);
-    if (parent) {
-        GncAtomHandle parent_atom = gnc_account_to_atomspace(parent);
-        gnc_atomspace_create_inheritance_link(concept_handle, parent_atom);
-    }
-    
-    g_message("Created OpenCog-style AtomSpace representation for account: %s", account_name.c_str());
-    return concept_handle;
-}
-
-GncAtomHandle gnc_atomspace_create_hierarchy_link(GncAtomHandle parent_atom, 
-                                                  GncAtomHandle child_atom)
-{
     if (!g_atomspace) {
         g_warning("Cognitive accounting not initialized");
         return 0;
     }
-    
-    return g_atomspace->create_hierarchy_link(parent_atom, child_atom);
+
+    auto it = g_atomspace->account_atoms.find(account);
+    if (it != g_atomspace->account_atoms.end())
+        return it->second;
+
+    const char *aname = xaccAccountGetName(account);
+    std::string name = std::string("Account:") + (aname ? aname : "unnamed");
+    GncAtomHandle concept_atom = g_atomspace->create_atom(GNC_ATOM_CONCEPT_NODE, name);
+    g_atomspace->account_atoms[account] = concept_atom;
+
+    GNCAccountType atype = xaccAccountGetType(account);
+    const char *type_str = xaccAccountTypeEnumAsString(atype);
+    GncAtomHandle type_node = g_atomspace->create_atom(
+        GNC_ATOM_CONCEPT_NODE,
+        std::string("AccountType:") + (type_str ? type_str : "UNKNOWN"));
+    gnc_atomspace_create_inheritance_link(concept_atom, type_node);
+
+    Account *parent = gnc_account_get_parent(const_cast<Account*>(account));
+    if (parent && parent != account) {
+        GncAtomHandle parent_atom = gnc_account_to_atomspace(parent);
+        if (parent_atom)
+            gnc_atomspace_create_inheritance_link(concept_atom, parent_atom);
+    }
+
+    gnc_numeric bal = xaccAccountGetBalance(account);
+    gdouble bal_d = gnc_numeric_to_double(bal);
+    gdouble tv = clamp01(1.0 / (1.0 + std::abs(bal_d) / 10000.0));
+    GncAtomHandle pred = gnc_atomspace_create_predicate_node("hasBalance");
+    gnc_atomspace_create_evaluation_link(pred, concept_atom, tv);
+
+    return concept_atom;
 }
 
-/********************************************************************\
- * PLN Ledger Rules                                                  *
-\********************************************************************/
-
-gdouble gnc_pln_validate_double_entry(const Transaction *transaction)
+void
+gnc_atomspace_remove_account(const Account *account)
 {
-    g_return_val_if_fail(transaction != nullptr, 0.0);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return 0.0;
+    if (!g_atomspace || !account) return;
+    g_atomspace->account_atoms.erase(account);
+}
+
+GncAtomHandle
+gnc_transaction_to_atomspace(const Transaction *transaction)
+{
+    g_return_val_if_fail(transaction != nullptr, 0);
+    if (!g_atomspace) return 0;
+
+    auto it = g_atomspace->transaction_atoms.find(transaction);
+    if (it != g_atomspace->transaction_atoms.end())
+        return it->second;
+
+    std::string name = "Transaction:" +
+        std::to_string(reinterpret_cast<uintptr_t>(transaction));
+    GncAtomHandle tx_atom = g_atomspace->create_atom(GNC_ATOM_CONCEPT_NODE, name);
+
+    GList *splits = xaccTransGetSplitList(const_cast<Transaction*>(transaction));
+    std::vector<GncAtomHandle> split_atoms;
+    for (GList *n = splits; n; n = n->next) {
+        Split *split = GNC_SPLIT(n->data);
+        Account *acc = xaccSplitGetAccount(split);
+        if (!acc) continue;
+        GncAtomHandle acc_atom = gnc_account_to_atomspace(acc);
+        gdouble amt = gnc_numeric_to_double(xaccSplitGetAmount(split));
+        std::string sname = "Split:" + std::to_string(acc_atom) +
+                            ":" + std::to_string(amt);
+        GncAtomHandle s_atom = g_atomspace->create_atom(
+            GNC_ATOM_EVALUATION_LINK, sname, {tx_atom, acc_atom});
+        g_atomspace->set_tv(s_atom, clamp01(1.0 - std::abs(amt) / 1e6), 0.8);
+        split_atoms.push_back(s_atom);
     }
-    
-    // Enhanced PLN-style double-entry validation with truth value computation
-    gnc_numeric total = gnc_numeric_zero();
-    GList *splits = xaccTransGetSplitList(transaction);
+
+    GncTruthValue tv{};
+    gnc_pln_validate_double_entry_tv(transaction, &tv);
+    GncAtomHandle rule = g_atomspace->create_atom(
+        GNC_ATOM_IMPLICATION_LINK,
+        "DoubleEntry:" + name,
+        split_atoms);
+    g_atomspace->set_tv(rule, tv.strength, tv.confidence);
+    g_atomspace->transaction_atoms[transaction] = tx_atom;
+    g_atomspace->last_validation[transaction] = tv.strength * tv.confidence;
+    return tx_atom;
+}
+
+/* ------------------------------------------------------------------ */
+/* PLN                                                                */
+/* ------------------------------------------------------------------ */
+
+gboolean
+gnc_pln_validate_double_entry_tv(const Transaction *transaction,
+                                 GncTruthValue *tv_out)
+{
+    g_return_val_if_fail(transaction != nullptr, FALSE);
+    g_return_val_if_fail(tv_out != nullptr, FALSE);
+
+    tv_out->strength = 0.0;
+    tv_out->confidence = 0.0;
+
+    if (!g_atomspace)
+        return FALSE;
+
+    GList *splits = xaccTransGetSplitList(const_cast<Transaction*>(transaction));
     gint split_count = g_list_length(splits);
-    
-    // Collect split amounts for analysis
-    std::vector<double> split_amounts;
-    
+    if (split_count == 0)
+        return TRUE;
+
+    gnc_numeric total = gnc_numeric_zero();
+    gdouble total_magnitude = 0.0;
+    gdouble total_attention = 0.0;
+    gint valid_accounts = 0;
+
     for (GList *node = splits; node; node = node->next) {
         Split *split = GNC_SPLIT(node->data);
         gnc_numeric amount = xaccSplitGetAmount(split);
         total = gnc_numeric_add(total, amount, GNC_DENOM_AUTO, GNC_HOW_RND_ROUND_HALF_UP);
-        split_amounts.push_back(gnc_numeric_to_double(amount));
-    }
-    
-//<<<<<<< copilot/fix-1-3
-    // PLN truth value computation
-    gdouble strength = 0.0;  // How true is the balance
-    gdouble confidence = 0.0; // How certain are we
-    
-//=======
-#ifdef HAVE_OPENCOG_PLN
-    // Use real PLN reasoning for advanced validation
-    try {
-        // Create PLN rule for double-entry validation
-        // This would involve creating proper PLN rules in the AtomSpace
-        // For now, we combine basic validation with PLN confidence assessment
-        
-        if (gnc_numeric_zero_p(total)) {
-            // Perfect balance - create high-confidence PLN assertion
-            return 0.95; // High PLN confidence for perfect balance
-        }
-        
-        // Use PLN uncertain reasoning for imbalanced transactions
-        gnc_numeric abs_total = gnc_numeric_abs(total);
-        double imbalance = gnc_numeric_to_double(abs_total);
-        
-        // PLN-based confidence decay with uncertainty quantification
-        return std::max(0.1, 0.9 * exp(-imbalance * 0.1));
-        
-    } catch (const std::exception& e) {
-        g_warning("PLN validation error: %s", e.what());
-        // Fall through to basic validation
-    }
-#endif
-    
-    // Enhanced PLN truth value computation with multi-factor uncertainty quantification
-//>>>>>>> stable
-    
-    // Multi-factor analysis components
-    gdouble transaction_complexity = std::log1p(split_count) / std::log(10.0); // log scale complexity
-    gdouble temporal_uncertainty = 1.0; // Account for transaction age
-    gdouble account_reliability = 1.0; // Attention-based credibility assessment
-    
-    // Calculate account reliability using attention parameters
-    gdouble total_attention = 0.0;
-    gint valid_accounts = 0;
-    for (GList *node = splits; node; node = node->next) {
-        Split *split = GNC_SPLIT(node->data);
+        total_magnitude += std::abs(gnc_numeric_to_double(amount));
         Account *account = xaccSplitGetAccount(split);
         if (account) {
+            /* Ensure mapped */
+            gnc_account_to_atomspace(account);
             GncAttentionParams params = gnc_ecan_get_attention_params(account);
             total_attention += params.sti + params.lti;
             valid_accounts++;
         }
     }
-    if (valid_accounts > 0) {
-        account_reliability = std::min(1.0, total_attention / (valid_accounts * 100.0));
-    }
-    
-    // Temporal uncertainty based on transaction timestamp
-    time64 tx_time = xaccTransGetDatePosted(transaction);
+
+    gdouble account_reliability = 0.5;
+    if (valid_accounts > 0)
+        account_reliability = clamp01(total_attention / (valid_accounts * 100.0) + 0.5);
+
+    time64 tx_time = xaccTransGetDate(const_cast<Transaction*>(transaction));
     time64 current_time = gnc_time(nullptr);
-    gdouble age_days = (current_time - tx_time) / (24.0 * 3600.0);
-    temporal_uncertainty = exp(-age_days / 365.0); // Decay over a year
-    
+    gdouble age_days = 0.0;
+    if (tx_time > 0 && current_time > tx_time)
+        age_days = static_cast<gdouble>(current_time - tx_time) / (24.0 * 3600.0);
+    gdouble temporal = std::exp(-age_days / 365.0);
+    gdouble complexity = std::log1p(static_cast<gdouble>(split_count)) / std::log(10.0);
+
     if (gnc_numeric_zero_p(total)) {
-        // Perfect balance - enhanced PLN reasoning
-        strength = 0.98;
-        
-        // Evidence integration: more splits and higher attention = higher confidence
-        gdouble evidence_strength = std::min(0.99, 0.5 + 0.05 * split_count);
-        gdouble complexity_factor = 1.0 - 0.15 * std::min(1.0, transaction_complexity);
-        gdouble reliability_factor = 0.8 + 0.2 * account_reliability;
-        gdouble temporal_factor = 0.9 + 0.1 * temporal_uncertainty;
-        
-        confidence = evidence_strength * complexity_factor * reliability_factor * temporal_factor;
-        confidence = std::max(0.6, std::min(0.99, confidence));
-        
+        tv_out->strength = 0.98;
+        gdouble evidence = std::min(0.99, 0.55 + 0.05 * split_count);
+        gdouble complexity_factor = 1.0 - 0.10 * std::min(1.0, complexity);
+        gdouble reliability_factor = 0.85 + 0.15 * account_reliability;
+        gdouble temporal_factor = 0.90 + 0.10 * temporal;
+        tv_out->confidence = clamp01(evidence * complexity_factor *
+                                     reliability_factor * temporal_factor);
+        tv_out->confidence = std::max(0.70, tv_out->confidence);
     } else {
-        // Imbalanced transaction - advanced PLN uncertain reasoning
-        double imbalance = gnc_numeric_to_double(gnc_numeric_abs(total));
-        
-        // Calculate total transaction magnitude for normalization
-        double total_magnitude = 0.0;
-        for (double amount : split_amounts) {
-            total_magnitude += std::abs(amount);
-        }
-        
-        if (total_magnitude > 0.0) {
-            double relative_imbalance = imbalance / total_magnitude;
-            
-            // Enhanced PLN strength with multiple factors
-            strength = exp(-8.0 * relative_imbalance) * account_reliability * temporal_uncertainty;
-            
-            // Advanced confidence computation with uncertainty quantification
-            gdouble base_confidence = 1.0 - relative_imbalance;
-            gdouble evidence_factor = std::min(1.0, split_count / 4.0);
-            gdouble complexity_penalty = 1.0 - 0.1 * transaction_complexity;
-            
-            confidence = base_confidence * evidence_factor * complexity_penalty * 
-                        account_reliability * temporal_uncertainty;
-            confidence = std::max(0.05, std::min(0.95, confidence));
-        }
+        gdouble imbalance = gnc_numeric_to_double(gnc_numeric_abs(total));
+        if (total_magnitude <= 0.0)
+            total_magnitude = imbalance;
+        gdouble relative = imbalance / total_magnitude;
+        tv_out->strength = clamp01(std::exp(-8.0 * relative) * account_reliability * temporal);
+        gdouble base_c = 1.0 - relative;
+        gdouble evidence = std::min(1.0, split_count / 4.0);
+        tv_out->confidence = clamp01(base_c * evidence * (1.0 - 0.1 * complexity) *
+                                     account_reliability * temporal);
+        tv_out->confidence = std::max(0.05, std::min(0.95, tv_out->confidence));
     }
-    
-    // Create enhanced PLN atoms for this validation with evidence integration
-    if (strength > 0.1) {
-        std::string validation_name = "DoubleEntryValidation:TX:" + 
-                                     std::to_string(reinterpret_cast<uintptr_t>(transaction)) +
-                                     ":Splits:" + std::to_string(split_count);
-        
-        GncAtomHandle validation_atom = g_atomspace->create_atom(
-            GNC_ATOM_IMPLICATION_LINK, validation_name);
-        gnc_atomspace_set_truth_value(validation_atom, strength, confidence);
-        
-        // Create evidence integration atoms for multi-factor analysis
-        std::string evidence_name = "ValidationEvidence:Complexity:" + 
-                                   std::to_string(transaction_complexity) +
-                                   ":Reliability:" + std::to_string(account_reliability);
-        GncAtomHandle evidence_atom = g_atomspace->create_atom(
-            GNC_ATOM_EVALUATION_LINK, evidence_name);
-        gnc_atomspace_set_truth_value(evidence_atom, 
-                                     (transaction_complexity + account_reliability) / 2.0, 
-                                     temporal_uncertainty);
+
+    if (g_atomspace) {
+        std::string vname = "DoubleEntryValidation:" +
+            std::to_string(reinterpret_cast<uintptr_t>(transaction));
+        GncAtomHandle vatom = g_atomspace->create_atom(GNC_ATOM_IMPLICATION_LINK, vname);
+        g_atomspace->set_tv(vatom, tv_out->strength, tv_out->confidence);
+        g_atomspace->last_validation[transaction] = tv_out->strength * tv_out->confidence;
     }
-    
-    g_debug("Enhanced PLN double-entry validation: strength=%.3f, confidence=%.3f, "
-            "complexity=%.3f, reliability=%.3f, temporal=%.3f", 
-            strength, confidence, transaction_complexity, account_reliability, temporal_uncertainty);
-    
-    // Return combined truth value for backward compatibility
-    return strength * confidence;
+    return TRUE;
 }
 
-gdouble gnc_pln_validate_n_entry(const Transaction *transaction, gint n_parties)
+gdouble
+gnc_pln_validate_double_entry(const Transaction *transaction)
+{
+    GncTruthValue tv{};
+    if (!gnc_pln_validate_double_entry_tv(transaction, &tv))
+        return 0.0;
+    return clamp01(tv.strength * tv.confidence);
+}
+
+gdouble
+gnc_pln_validate_n_entry(const Transaction *transaction, gint n_parties)
 {
     g_return_val_if_fail(transaction != nullptr, 0.0);
     g_return_val_if_fail(n_parties >= 2, 0.0);
-    
-    if (!g_atomspace) {
+    if (!g_atomspace)
         return gnc_pln_validate_double_entry(transaction);
-    }
-    
-    GList *splits = xaccTransGetSplitList(transaction);
+
+    GList *splits = xaccTransGetSplitList(const_cast<Transaction*>(transaction));
     gint split_count = g_list_length(splits);
-    
-    // PLN reasoning for N-entry validation
-    if (split_count < n_parties) {
-        // Create failed validation atom
-        GncAtomHandle failure_atom = g_atomspace->create_atom(
-            GNC_ATOM_IMPLICATION_LINK,
-            "NEntryValidationFailure:InsufficientSplits"
-        );
-        gnc_atomspace_set_truth_value(failure_atom, 0.0, 0.9);
+    if (split_count < n_parties)
         return 0.0;
-    }
-    
-    // Base validation using double-entry logic
-    gdouble base_strength, base_confidence;
-    gdouble base_validation = gnc_pln_validate_double_entry(transaction);
-    
-    // Decompose the validation result (approximation)
-    base_strength = sqrt(base_validation);
-    base_confidence = base_validation / (base_strength + 0.001);
-    
-    // PLN complexity adjustment based on number of parties
+
+    GncTruthValue tv{};
+    gnc_pln_validate_double_entry_tv(transaction, &tv);
     gdouble complexity_factor = 1.0 / (1.0 + 0.1 * (n_parties - 2));
-    gdouble evidence_factor = std::min(1.0, split_count / (gdouble)n_parties);
-    
-    // Combine factors using PLN truth value revision
-    gdouble final_strength = base_strength * complexity_factor;
-    gdouble final_confidence = std::min(0.95, base_confidence * evidence_factor);
-    
-    // Create N-entry validation atom
-    std::string validation_name = "NEntryValidation:Parties:" + std::to_string(n_parties) +
-                                 ":Transaction:" + std::to_string(reinterpret_cast<uintptr_t>(transaction));
-    
-    GncAtomHandle n_entry_atom = g_atomspace->create_atom(GNC_ATOM_IMPLICATION_LINK, validation_name);
-    gnc_atomspace_set_truth_value(n_entry_atom, final_strength, final_confidence);
-    
-    g_debug("PLN N-entry validation (%d parties): strength=%.3f, confidence=%.3f", 
-            n_parties, final_strength, final_confidence);
-    
-    return final_strength * final_confidence;
+    gdouble evidence_factor = std::min(1.0, split_count / static_cast<gdouble>(n_parties));
+    gdouble strength = tv.strength * complexity_factor;
+    gdouble confidence = std::min(0.95, tv.confidence * evidence_factor);
+
+    std::string name = "NEntryValidation:Parties:" + std::to_string(n_parties);
+    GncAtomHandle atom = g_atomspace->create_atom(GNC_ATOM_IMPLICATION_LINK, name);
+    g_atomspace->set_tv(atom, strength, confidence);
+    return clamp01(strength * confidence);
 }
 
-GncAtomHandle gnc_pln_generate_trial_balance_proof(const Account *root_account)
+static void
+accumulate_account_tree_balances(const Account *account,
+                                 gnc_numeric *debits, gnc_numeric *credits)
 {
-    g_return_val_if_fail(root_account != nullptr, 0);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
+    if (!account) return;
+    gnc_numeric bal = xaccAccountGetBalance(account);
+    gdouble d = gnc_numeric_to_double(bal);
+    if (d >= 0.0)
+        *debits = gnc_numeric_add(*debits, bal, GNC_DENOM_AUTO, GNC_HOW_RND_ROUND_HALF_UP);
+    else
+        *credits = gnc_numeric_add(*credits, gnc_numeric_neg(bal),
+                                   GNC_DENOM_AUTO, GNC_HOW_RND_ROUND_HALF_UP);
+
+    GList *children = gnc_account_get_children(const_cast<Account*>(account));
+    for (GList *n = children; n; n = n->next)
+        accumulate_account_tree_balances(GNC_ACCOUNT(n->data), debits, credits);
+    g_list_free(children);
+}
+
+gboolean
+gnc_pln_trial_balance_report(const Account *root_account, GncProofReport *report_out)
+{
+    g_return_val_if_fail(root_account != nullptr, FALSE);
+    g_return_val_if_fail(report_out != nullptr, FALSE);
+    if (!g_atomspace) return FALSE;
+
+    memset(report_out, 0, sizeof(*report_out));
+    report_out->total_debits = gnc_numeric_zero();
+    report_out->total_credits = gnc_numeric_zero();
+    accumulate_account_tree_balances(root_account,
+                                     &report_out->total_debits,
+                                     &report_out->total_credits);
+    report_out->imbalance = gnc_numeric_sub(report_out->total_debits,
+                                            report_out->total_credits,
+                                            GNC_DENOM_AUTO, GNC_HOW_RND_ROUND_HALF_UP);
+    report_out->balanced = gnc_numeric_zero_p(report_out->imbalance);
+
+    gdouble imb = std::abs(gnc_numeric_to_double(report_out->imbalance));
+    gdouble mag = std::abs(gnc_numeric_to_double(report_out->total_debits)) +
+                  std::abs(gnc_numeric_to_double(report_out->total_credits));
+    if (report_out->balanced) {
+        report_out->strength = 0.98;
+        report_out->confidence = 0.95;
+    } else if (mag > 0.0) {
+        gdouble rel = imb / mag;
+        report_out->strength = clamp01(std::exp(-8.0 * rel));
+        report_out->confidence = clamp01(1.0 - rel);
+    } else {
+        report_out->strength = 0.5;
+        report_out->confidence = 0.5;
+    }
+
+    const char *rname = xaccAccountGetName(root_account);
+    std::string proof_name = std::string("TrialBalanceProof:") + (rname ? rname : "root");
+    report_out->proof_atom = g_atomspace->create_atom(GNC_ATOM_SCHEMA_NODE, proof_name);
+    g_atomspace->set_tv(report_out->proof_atom, report_out->strength, report_out->confidence);
+    return TRUE;
+}
+
+GncAtomHandle
+gnc_pln_generate_trial_balance_proof(const Account *root_account)
+{
+    GncProofReport report{};
+    if (!gnc_pln_trial_balance_report(root_account, &report))
         return 0;
-    }
-    
-    // Create trial balance proof atom
-    std::string proof_name = "TrialBalanceProof:" + 
-                            std::string(xaccAccountGetName(root_account));
-    
-    GncAtomHandle proof_atom = g_atomspace->create_atom(
-        GNC_ATOM_TRANSACTION_RULE,
-        proof_name
-    );
-    
-#ifdef HAVE_OPENCOG_PLN
-    // Create formal PLN proof structure in AtomSpace
-    try {
-        // This would create a proper PLN inference tree for trial balance validation
-        // using forward and backward chaining
-        g_message("Generated formal PLN trial balance proof using OpenCog PLN");
-        
-#ifdef HAVE_OPENCOG_ATOMSPACE
-        // Set higher confidence for real PLN proofs
-        if (g_atomspace->opencog_handles.find(proof_atom) != g_atomspace->opencog_handles.end()) {
-            Handle opencog_handle = g_atomspace->opencog_handles[proof_atom];
-            TruthValuePtr tv = SimpleTruthValue::createTV(0.95, 0.90);
-            g_atomspace->atomspace->set_truthvalue(opencog_handle, tv);
-        }
-#endif
-        
-    } catch (const std::exception& e) {
-        g_warning("PLN proof generation error: %s", e.what());
-    }
-#endif
-    
-    // Set high confidence for trial balance proof
-#ifdef HAVE_OPENCOG_ATOMSPACE
-    auto& params = g_atomspace->attention_params[proof_atom];
-    params.confidence = 0.95;
-#else
-    g_atomspace->attention_params[proof_atom].confidence = 0.95;
-#endif
-    
-    g_message("Generated trial balance proof for account tree: %s", 
-              xaccAccountGetName(root_account));
-    
-    return proof_atom;
+    return report.proof_atom;
 }
 
-GncAtomHandle gnc_pln_generate_pl_proof(const Account *income_account,
-                                        const Account *expense_account)
+gboolean
+gnc_pln_pl_report(const Account *income_account, const Account *expense_account,
+                  GncProofReport *report_out)
 {
-    g_return_val_if_fail(income_account != nullptr, 0);
-    g_return_val_if_fail(expense_account != nullptr, 0);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
+    g_return_val_if_fail(income_account && expense_account && report_out, FALSE);
+    if (!g_atomspace) return FALSE;
+
+    memset(report_out, 0, sizeof(*report_out));
+    gnc_numeric income = xaccAccountGetBalance(income_account);
+    gnc_numeric expense = xaccAccountGetBalance(expense_account);
+    /* Income accounts typically negative in GnuCash sign convention; use abs nets */
+    gdouble inc = std::abs(gnc_numeric_to_double(income));
+    gdouble exp = std::abs(gnc_numeric_to_double(expense));
+    report_out->total_debits = gnc_numeric_create(static_cast<gint64>(exp * 100), 100);
+    report_out->total_credits = gnc_numeric_create(static_cast<gint64>(inc * 100), 100);
+    report_out->imbalance = gnc_numeric_sub(report_out->total_credits,
+                                            report_out->total_debits,
+                                            GNC_DENOM_AUTO, GNC_HOW_RND_ROUND_HALF_UP);
+    report_out->balanced = TRUE; /* P&L is not required to zero */
+    report_out->strength = 0.9;
+    report_out->confidence = 0.85;
+
+    std::string name = std::string("PLProof:") +
+        (xaccAccountGetName(income_account) ? xaccAccountGetName(income_account) : "I") +
+        "-" +
+        (xaccAccountGetName(expense_account) ? xaccAccountGetName(expense_account) : "E");
+    report_out->proof_atom = g_atomspace->create_atom(GNC_ATOM_SCHEMA_NODE, name);
+    g_atomspace->set_tv(report_out->proof_atom, report_out->strength, report_out->confidence);
+    return TRUE;
+}
+
+GncAtomHandle
+gnc_pln_generate_pl_proof(const Account *income_account,
+                          const Account *expense_account)
+{
+    GncProofReport report{};
+    if (!gnc_pln_pl_report(income_account, expense_account, &report))
         return 0;
-    }
-    
-    std::string proof_name = "PLProof:" + 
-                            std::string(xaccAccountGetName(income_account)) + 
-                            "-" + 
-                            std::string(xaccAccountGetName(expense_account));
-    
-    return g_atomspace->create_atom(GNC_ATOM_TRANSACTION_RULE, proof_name);
+    return report.proof_atom;
 }
 
-/********************************************************************\
- * Scheme-based Cognitive Representations                            *
-\********************************************************************/
-
-char* gnc_account_to_scheme_representation(const Account *account)
+gdouble
+gnc_pln_get_last_validation_score(const Transaction *transaction)
 {
-    g_return_val_if_fail(account != nullptr, nullptr);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return nullptr;
-    }
-    
-    std::string account_name = xaccAccountGetName(account) ? 
-                              xaccAccountGetName(account) : "unnamed_account";
-    GNCAccountType acct_type = xaccAccountGetType(account);
-    gnc_numeric balance = xaccAccountGetBalance(account);
-    
-    // Generate Scheme representation
-    std::ostringstream scheme_repr;
-    scheme_repr << "(ConceptNode \"Account:" << account_name << "\")\n";
-    scheme_repr << "(InheritanceLink\n";
-    scheme_repr << "  (ConceptNode \"Account:" << account_name << "\")\n";
-    scheme_repr << "  (ConceptNode \"Category:" << xaccAccountGetTypeStr(acct_type) << "\"))\n";
-    scheme_repr << "(EvaluationLink\n";
-    scheme_repr << "  (PredicateNode \"hasBalance\")\n";
-    scheme_repr << "  (ListLink\n";
-    scheme_repr << "    (ConceptNode \"Account:" << account_name << "\")\n";
-    scheme_repr << "    (NumberNode " << gnc_numeric_to_double(balance) << ")))\n";
-    
-    return g_strdup(scheme_repr.str().c_str());
+    if (!g_atomspace || !transaction) return 0.0;
+    auto it = g_atomspace->last_validation.find(transaction);
+    return it == g_atomspace->last_validation.end() ? 0.0 : it->second;
 }
 
-char* gnc_transaction_to_scheme_pattern(const Transaction *transaction)
+/* ------------------------------------------------------------------ */
+/* ECAN                                                               */
+/* ------------------------------------------------------------------ */
+
+void
+gnc_ecan_update_account_attention(Account *account,
+                                  const Transaction *transaction)
 {
-    g_return_val_if_fail(transaction != nullptr, nullptr);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return nullptr;
-    }
-    
-    std::ostringstream scheme_pattern;
-    scheme_pattern << "; Transaction pattern for OpenCog reasoning\n";
-    scheme_pattern << "(BindLink\n";
-    scheme_pattern << "  (VariableList\n";
-    scheme_pattern << "    (VariableNode \"$transaction\"))\n";
-    scheme_pattern << "  (AndLink\n";
-    
-    GList *splits = xaccTransGetSplitList(transaction);
+    g_return_if_fail(account != nullptr);
+    g_return_if_fail(transaction != nullptr);
+    if (!g_atomspace) return;
+
+    GncAtomHandle h = gnc_account_to_atomspace(account);
+    auto *atom = g_atomspace->get(h);
+    if (!atom) return;
+
+    GList *splits = xaccTransGetSplitList(const_cast<Transaction*>(transaction));
+    gint split_count = g_list_length(splits);
+    gdouble magnitude = 0.0;
+    std::vector<Account*> co_accounts;
+
     for (GList *node = splits; node; node = node->next) {
         Split *split = GNC_SPLIT(node->data);
-        Account *account = xaccSplitGetAccount(split);
-        gnc_numeric amount = xaccSplitGetAmount(split);
-        
-        if (account) {
-            std::string account_name = xaccAccountGetName(account) ? 
-                                      xaccAccountGetName(account) : "unnamed_account";
-            
-            scheme_pattern << "    (EvaluationLink\n";
-            scheme_pattern << "      (PredicateNode \"involvesSplit\")\n";
-            scheme_pattern << "      (ListLink\n";
-            scheme_pattern << "        (VariableNode \"$transaction\")\n";
-            scheme_pattern << "        (ConceptNode \"Account:" << account_name << "\")\n";
-            scheme_pattern << "        (NumberNode " << gnc_numeric_to_double(amount) << ")))\n";
+        Account *acc = xaccSplitGetAccount(split);
+        if (!acc) continue;
+        if (acc == account)
+            magnitude += std::abs(gnc_numeric_to_double(xaccSplitGetAmount(split)));
+        else
+            co_accounts.push_back(acc);
+    }
+
+    auto& params = atom->attention;
+    gdouble activity_boost = 0.05 + (split_count * 0.02) + (magnitude / 10000.0);
+    activity_boost = std::min(0.5, activity_boost);
+    gdouble wage_payment = params.wage * (1.0 + params.lti / 100.0) *
+                           (1.0 + params.activity_level) * activity_boost;
+
+    if (g_atomspace->total_sti_funds >= wage_payment) {
+        params.sti += wage_payment;
+        g_atomspace->total_sti_funds -= wage_payment;
+        params.activity_level += activity_boost;
+        gdouble rent_payment = params.rent * (1.0 + params.sti / 100.0);
+        if (params.sti > rent_payment)
+            params.sti -= rent_payment;
+    }
+
+    gdouble lti_growth = activity_boost * 0.1;
+    if (g_atomspace->total_lti_funds >= lti_growth) {
+        params.lti += lti_growth;
+        g_atomspace->total_lti_funds -= lti_growth;
+    }
+    if (params.lti > 50.0 && params.activity_level > 1.0)
+        params.vlti += 0.001;
+
+    params.sti *= (1.0 - g_atomspace->attention_decay_rate);
+    params.activity_level *= 0.98;
+    g_atomspace->refresh_legacy_attention(params);
+
+    /* Hebbian-style co-occurrence boost */
+    for (Account *other : co_accounts) {
+        GncAtomHandle oh = gnc_account_to_atomspace(other);
+        auto *oatom = g_atomspace->get(oh);
+        if (!oatom) continue;
+        oatom->attention.sti += activity_boost * 0.1;
+        g_atomspace->refresh_legacy_attention(oatom->attention);
+        std::string link_name = "Hebbian:" + std::to_string(h) + "-" + std::to_string(oh);
+        GncAtomHandle link = g_atomspace->create_atom(
+            GNC_ATOM_SIMILARITY_LINK, link_name, {h, oh});
+        g_atomspace->set_tv(link, clamp01(activity_boost), 0.6);
+    }
+}
+
+GncAttentionParams
+gnc_ecan_get_attention_params(const Account *account)
+{
+    GncAttentionParams def{};
+    g_return_val_if_fail(account != nullptr, def);
+    if (!g_atomspace) return def;
+
+    auto it = g_atomspace->account_atoms.find(account);
+    if (it == g_atomspace->account_atoms.end()) {
+        /* Map lazily so subsequent updates work */
+        GncAtomHandle h = gnc_account_to_atomspace(account);
+        auto *a = g_atomspace->get(h);
+        return a ? a->attention : def;
+    }
+    auto *a = g_atomspace->get(it->second);
+    return a ? a->attention : def;
+}
+
+void
+gnc_ecan_allocate_attention(Account **accounts, gint n_accounts)
+{
+    g_return_if_fail(accounts != nullptr && n_accounts > 0);
+    if (!g_atomspace) return;
+
+    gdouble total_activity = 0.0;
+    std::vector<GncAtomHandle> handles;
+    std::vector<gdouble> scores;
+
+    for (gint i = 0; i < n_accounts; i++) {
+        if (!accounts[i]) continue;
+        GncAtomHandle h = gnc_account_to_atomspace(accounts[i]);
+        auto *a = g_atomspace->get(h);
+        if (!a) continue;
+        handles.push_back(h);
+        gdouble score = a->attention.activity_level + a->attention.sti / 100.0 +
+                        a->attention.lti / 50.0;
+        scores.push_back(std::max(0.01, score));
+        total_activity += scores.back();
+    }
+    if (handles.empty() || total_activity <= 0.0) return;
+
+    gdouble sti_pool = g_atomspace->total_sti_funds * 0.1;
+    gdouble lti_pool = g_atomspace->total_lti_funds * 0.05;
+    for (size_t i = 0; i < handles.size(); i++) {
+        auto *a = g_atomspace->get(handles[i]);
+        if (!a) continue;
+        gdouble ratio = scores[i] / total_activity;
+        gdouble ds = sti_pool * ratio;
+        gdouble dl = lti_pool * ratio;
+        a->attention.sti += ds;
+        a->attention.lti += dl;
+        g_atomspace->total_sti_funds -= ds;
+        g_atomspace->total_lti_funds -= dl;
+        gdouble rent = a->attention.rent * (1.0 + a->attention.sti / 200.0);
+        if (a->attention.sti > rent) a->attention.sti -= rent;
+        a->attention.sti *= (1.0 - g_atomspace->attention_decay_rate);
+        a->attention.activity_level *= 0.95;
+        g_atomspace->refresh_legacy_attention(a->attention);
+    }
+
+    g_atomspace->total_sti_funds = std::min(2000.0, g_atomspace->total_sti_funds + 50.0);
+    g_atomspace->total_lti_funds = std::min(1000.0, g_atomspace->total_lti_funds + 10.0);
+}
+
+void
+gnc_ecan_decay_tick(void)
+{
+    if (!g_atomspace) return;
+    for (auto &pair : g_atomspace->atoms) {
+        auto &p = pair.second.attention;
+        p.sti *= (1.0 - g_atomspace->attention_decay_rate);
+        p.lti *= (1.0 - g_atomspace->attention_decay_rate * 0.1);
+        if (p.sti > p.rent) {
+            p.sti -= p.rent;
+            g_atomspace->total_sti_funds += p.rent * 0.5;
+        }
+        g_atomspace->refresh_legacy_attention(p);
+    }
+}
+
+gint
+gnc_ecan_top_accounts(Account **out_accounts, gint max_accounts)
+{
+    g_return_val_if_fail(out_accounts != nullptr && max_accounts > 0, 0);
+    if (!g_atomspace) return 0;
+
+    std::vector<std::pair<gdouble, const Account*>> ranked;
+    for (const auto &pair : g_atomspace->account_atoms) {
+        auto *a = g_atomspace->get(pair.second);
+        if (!a) continue;
+        ranked.emplace_back(a->attention.attention_value, pair.first);
+    }
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto &x, const auto &y) { return x.first > y.first; });
+
+    gint n = std::min(max_accounts, static_cast<gint>(ranked.size()));
+    for (gint i = 0; i < n; i++)
+        out_accounts[i] = const_cast<Account*>(ranked[i].second);
+    return n;
+}
+
+/* ------------------------------------------------------------------ */
+/* MOSES                                                              */
+/* ------------------------------------------------------------------ */
+
+GncAtomHandle
+gnc_moses_discover_balancing_strategies(Transaction **historical_transactions,
+                                        gint n_transactions)
+{
+    g_return_val_if_fail(historical_transactions != nullptr && n_transactions > 0, 0);
+    if (!g_atomspace) return 0;
+
+    std::map<std::string, gint> freq;
+    std::map<std::string, gdouble> fitness;
+    std::ostringstream json;
+    json << "[";
+
+    for (gint i = 0; i < n_transactions; i++) {
+        Transaction *trans = historical_transactions[i];
+        if (!trans) continue;
+        GList *splits = xaccTransGetSplitList(trans);
+        gint split_count = g_list_length(splits);
+        gint dow = 0;
+        time64 t = xaccTransGetDate(trans);
+        if (t > 0) {
+            GDate date;
+            g_date_clear(&date, 1);
+            g_date_set_time_t(&date, static_cast<time_t>(t));
+            dow = g_date_get_weekday(&date);
+        }
+        gdouble mag = 0.0;
+        std::map<GNCAccountType, gint> type_counts;
+        for (GList *n = splits; n; n = n->next) {
+            Split *s = GNC_SPLIT(n->data);
+            mag += std::abs(gnc_numeric_to_double(xaccSplitGetAmount(s)));
+            Account *a = xaccSplitGetAccount(s);
+            if (a) type_counts[xaccAccountGetType(a)]++;
+        }
+        gint bucket = static_cast<gint>(std::log1p(mag));
+        std::string key = "sc:" + std::to_string(split_count) +
+                          "|dow:" + std::to_string(dow) +
+                          "|amt:" + std::to_string(bucket);
+        for (auto &tc : type_counts)
+            key += "|t" + std::to_string(tc.first) + ":" + std::to_string(tc.second);
+
+        gdouble v = gnc_pln_validate_double_entry(trans);
+        freq[key]++;
+        fitness[key] += v;
+    }
+
+    std::string best;
+    gdouble best_fit = -1.0;
+    gboolean first = TRUE;
+    for (auto &p : freq) {
+        gdouble avg = fitness[p.first] / p.second;
+        gdouble weighted = avg * std::sqrt(static_cast<gdouble>(p.second));
+        if (!first) json << ",";
+        first = FALSE;
+        json << "{\"pattern\":\"" << p.first << "\",\"frequency\":" << p.second
+             << ",\"avg_fitness\":" << avg << ",\"weighted\":" << weighted << "}";
+        if (weighted > best_fit) {
+            best_fit = weighted;
+            best = p.first;
         }
     }
-    
-    scheme_pattern << "  )\n";
-    scheme_pattern << "  (VariableNode \"$transaction\"))\n";
-    
-    return g_strdup(scheme_pattern.str().c_str());
+    json << "]";
+    g_atomspace->last_moses_json = json.str();
+
+    std::string strategy_name = "MOSESStrategy:" + best +
+                                ":Fitness:" + std::to_string(best_fit);
+    GncAtomHandle strategy_atom =
+        g_atomspace->create_atom(GNC_ATOM_COMBO_NODE, strategy_name);
+    gdouble confidence = best.empty() ? 0.3 :
+        std::min(0.95, freq[best] / static_cast<gdouble>(n_transactions));
+    gdouble strength = clamp01(best_fit > 0 ? best_fit : 0.3);
+    g_atomspace->set_tv(strategy_atom, strength, confidence);
+
+    auto *a = g_atomspace->get(strategy_atom);
+    if (a) {
+        a->attention.sti = strength * 50.0;
+        a->attention.lti += 10.0;
+        g_atomspace->refresh_legacy_attention(a->attention);
+    }
+
+    gnc_scheme_evolutionary_optimization(historical_transactions, n_transactions);
+    return strategy_atom;
 }
 
-GncAtomHandle gnc_evaluate_scheme_expression(const char* scheme_expr)
+Transaction*
+gnc_moses_optimize_transaction(const Transaction *transaction)
+{
+    g_return_val_if_fail(transaction != nullptr, nullptr);
+    if (!g_atomspace)
+        return const_cast<Transaction*>(transaction);
+
+    gdouble fitness = gnc_pln_validate_double_entry(transaction);
+    GncAtomHandle opt = g_atomspace->create_atom(
+        GNC_ATOM_GROUNDED_SCHEMA,
+        "MOSESOptimization:" + std::to_string(reinterpret_cast<uintptr_t>(transaction)));
+    g_atomspace->set_tv(opt, clamp01(fitness), 0.8);
+
+    /* Never mutate committed transactions; return original pointer. */
+    return const_cast<Transaction*>(transaction);
+}
+
+char*
+gnc_moses_last_strategies_json(void)
+{
+    if (!g_atomspace)
+        return g_strdup("[]");
+    return g_strdup(g_atomspace->last_moses_json.c_str());
+}
+
+/* ------------------------------------------------------------------ */
+/* URE                                                                */
+/* ------------------------------------------------------------------ */
+
+gboolean
+gnc_ure_predict_balance_ex(const Account *account, time64 future_date,
+                           GncUrePrediction *prediction_out)
+{
+    g_return_val_if_fail(account != nullptr && prediction_out != nullptr, FALSE);
+    memset(prediction_out, 0, sizeof(*prediction_out));
+
+    gnc_numeric current = xaccAccountGetBalance(account);
+    time64 now = gnc_time(nullptr);
+    if (future_date <= now) {
+        prediction_out->point_estimate = current;
+        prediction_out->lower_bound = current;
+        prediction_out->upper_bound = current;
+        prediction_out->confidence = 1.0;
+        return TRUE;
+    }
+
+    /* Mean drift from recent split activity on this account */
+    gdouble sum_flow = 0.0;
+    gdouble sum_sq = 0.0;
+    gint n_flow = 0;
+    time64 earliest = now;
+    for (GList *n = xaccAccountGetSplitList(const_cast<Account*>(account)); n; n = n->next) {
+        Split *s = GNC_SPLIT(n->data);
+        Transaction *tx = xaccSplitGetParent(s);
+        if (!tx) continue;
+        time64 td = xaccTransGetDate(tx);
+        if (td <= 0) continue;
+        if (td < earliest) earliest = td;
+        gdouble amt = gnc_numeric_to_double(xaccSplitGetAmount(s));
+        sum_flow += amt;
+        sum_sq += amt * amt;
+        n_flow++;
+        if (n_flow >= 64) break; /* bound work */
+    }
+
+    gdouble days_hist = std::max(1.0, static_cast<gdouble>(now - earliest) / 86400.0);
+    gdouble daily_drift = (n_flow > 0) ? (sum_flow / days_hist) : 0.0;
+    gdouble mean = (n_flow > 0) ? (sum_flow / n_flow) : 0.0;
+    gdouble var = (n_flow > 1) ? (sum_sq / n_flow - mean * mean) : 0.0;
+    if (var < 0.0) var = 0.0;
+    gdouble stdev = std::sqrt(var);
+
+    gdouble days_future = static_cast<gdouble>(future_date - now) / 86400.0;
+    gdouble cur = gnc_numeric_to_double(current);
+    gdouble point = cur + daily_drift * days_future;
+    gdouble uncertainty = stdev * std::sqrt(std::max(1.0, days_future / 30.0)) +
+                          std::abs(daily_drift) * 0.1 * days_future;
+
+    GncAttentionParams att = gnc_ecan_get_attention_params(account);
+    gdouble conf = clamp01(0.5 + 0.3 * att.confidence + 0.2 * std::min(1.0, n_flow / 20.0));
+    conf *= std::exp(-days_future / 365.0);
+    conf = clamp01(conf);
+
+    prediction_out->point_estimate = double_to_gnc_numeric(point, 100, GNC_HOW_RND_ROUND_HALF_UP);
+    prediction_out->lower_bound = double_to_gnc_numeric(point - 1.96 * uncertainty, 100,
+                                                        GNC_HOW_RND_ROUND_HALF_UP);
+    prediction_out->upper_bound = double_to_gnc_numeric(point + 1.96 * uncertainty, 100,
+                                                        GNC_HOW_RND_ROUND_HALF_UP);
+    prediction_out->confidence = conf;
+
+    if (g_atomspace) {
+        GncAtomHandle h = g_atomspace->create_atom(
+            GNC_ATOM_EVALUATION_LINK,
+            std::string("UREPrediction:") +
+                (xaccAccountGetName(account) ? xaccAccountGetName(account) : "?"));
+        g_atomspace->set_tv(h, conf, conf);
+    }
+    return TRUE;
+}
+
+gnc_numeric
+gnc_ure_predict_balance(const Account *account, time64 future_date)
+{
+    GncUrePrediction pred{};
+    if (!gnc_ure_predict_balance_ex(account, future_date, &pred))
+        return account ? xaccAccountGetBalance(account) : gnc_numeric_zero();
+    return pred.point_estimate;
+}
+
+gdouble
+gnc_ure_transaction_validity(const Transaction *transaction)
+{
+    g_return_val_if_fail(transaction != nullptr, 0.0);
+    if (!g_atomspace)
+        return gnc_pln_validate_double_entry(transaction);
+
+    GncTruthValue tv{};
+    gnc_pln_validate_double_entry_tv(transaction, &tv);
+    gdouble base = tv.strength * tv.confidence;
+
+    GList *splits = xaccTransGetSplitList(const_cast<Transaction*>(transaction));
+    gint split_count = g_list_length(splits);
+    gdouble complexity_u = 1.0;
+    if (split_count > 2)
+        complexity_u = std::max(0.5, 1.0 - 0.05 * (split_count - 2));
+
+    time64 trans_time = xaccTransGetDate(const_cast<Transaction*>(transaction));
+    time64 current_time = gnc_time(nullptr);
+    gdouble temporal_u = 1.0;
+    if (trans_time > 0 && current_time > trans_time) {
+        gdouble age_days = static_cast<gdouble>(current_time - trans_time) / 86400.0;
+        temporal_u = std::max(0.3, std::exp(-age_days / 365.0));
+    }
+
+    gdouble account_u = 0.5;
+    gint ac = 0;
+    gdouble att_sum = 0.0;
+    for (GList *node = splits; node; node = node->next) {
+        Account *account = xaccSplitGetAccount(GNC_SPLIT(node->data));
+        if (!account) continue;
+        GncAttentionParams p = gnc_ecan_get_attention_params(account);
+        att_sum += p.confidence;
+        ac++;
+    }
+    if (ac > 0) account_u = att_sum / ac;
+
+    gdouble combined = (complexity_u + temporal_u + account_u) / 3.0;
+    gdouble final_v = clamp01(base * combined);
+
+    GncAtomHandle atom = g_atomspace->create_atom(
+        GNC_ATOM_EVALUATION_LINK,
+        "UREValidity:" + std::to_string(reinterpret_cast<uintptr_t>(transaction)));
+    g_atomspace->set_tv(atom, final_v, combined);
+    return final_v;
+}
+
+/* ------------------------------------------------------------------ */
+/* Scheme export helpers                                              */
+/* ------------------------------------------------------------------ */
+
+char*
+gnc_account_to_scheme_representation(const Account *account)
+{
+    g_return_val_if_fail(account != nullptr, nullptr);
+    const char *aname = xaccAccountGetName(account);
+    std::string safe = sanitize_scheme_string(aname ? aname : "unnamed");
+    GNCAccountType t = xaccAccountGetType(account);
+    const char *ts = xaccAccountTypeEnumAsString(t);
+    std::ostringstream ss;
+    ss << "; Account hypergraph export\n"
+       << "(define account-repr\n"
+       << "  (list\n"
+       << "    (ConceptNode \"Account:" << safe << "\")\n"
+       << "    (InheritanceLink\n"
+       << "      (ConceptNode \"Account:" << safe << "\")\n"
+       << "      (ConceptNode \"AccountType:" << (ts ? ts : "UNKNOWN") << "\"))\n"
+       << "    (EvaluationLink\n"
+       << "      (PredicateNode \"hasBalance\")\n"
+       << "      (ConceptNode \"Account:" << safe << "\"))))\n";
+    return g_strdup(ss.str().c_str());
+}
+
+char*
+gnc_transaction_to_scheme_pattern(const Transaction *transaction)
+{
+    g_return_val_if_fail(transaction != nullptr, nullptr);
+    GList *splits = xaccTransGetSplitList(const_cast<Transaction*>(transaction));
+    gint sc = g_list_length(splits);
+    std::ostringstream ss;
+    ss << "(BindLink\n"
+       << "  (VariableNode \"$split\")\n"
+       << "  (AndLink\n"
+       << "    (EvaluationLink (PredicateNode \"inTransaction\") "
+       << "(ListLink (ConceptNode \"TX\") (VariableNode \"$split\")))\n"
+       << "    (EqualLink (ArityOf (ConceptNode \"TX\")) "
+       << "(NumberNode \"" << sc << "\"))))\n";
+    return g_strdup(ss.str().c_str());
+}
+
+GncAtomHandle
+gnc_evaluate_scheme_expression(const char* scheme_expr)
 {
     g_return_val_if_fail(scheme_expr != nullptr, 0);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return 0;
-    }
-    
-    // Create an atom to represent the evaluated expression result
-    std::string result_name = "SchemeResult:" + std::string(scheme_expr).substr(0, 50);
-    GncAtomHandle result_atom = g_atomspace->create_atom(GNC_ATOM_CONCEPT_NODE, result_name);
-    
-    // Set high confidence for scheme evaluation results
-    gnc_atomspace_set_truth_value(result_atom, 0.8, 0.9);
-    
-    g_message("Evaluated Scheme expression (simulated): %s", scheme_expr);
-    return result_atom;
+    if (!g_atomspace) return 0;
+    /* Do not eval untrusted book data; record as concept only. */
+    std::string safe = sanitize_scheme_string(scheme_expr);
+    if (safe.size() > 200) safe.resize(200);
+    return g_atomspace->create_atom(GNC_ATOM_CONCEPT_NODE, "SchemeExpr:" + safe);
 }
 
-char* gnc_create_hypergraph_pattern_encoding(const Account *root_account)
+char*
+gnc_create_hypergraph_pattern_encoding(const Account *root_account)
 {
     g_return_val_if_fail(root_account != nullptr, nullptr);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return nullptr;
-    }
-    
     std::ostringstream hypergraph_pattern;
     hypergraph_pattern << "; Hypergraph pattern encoding for account hierarchy\n";
     hypergraph_pattern << "(BindLink\n";
@@ -908,1418 +1203,520 @@ char* gnc_create_hypergraph_pattern_encoding(const Account *root_account)
     hypergraph_pattern << "      (VariableNode \"$account\")\n";
     hypergraph_pattern << "      (TypeNode \"ConceptNode\")))\n";
     hypergraph_pattern << "  (AndLink\n";
-    
-    // Recursive pattern generation for account hierarchy
-    std::function<void(const Account*, int)> add_account_pattern = 
+
+    std::function<void(const Account*, int)> add_account_pattern =
         [&](const Account* account, int depth) {
             if (!account) return;
-            
-            std::string account_name = xaccAccountGetName(account) ? 
-                                      xaccAccountGetName(account) : "unnamed_account";
-            
-            hypergraph_pattern << std::string(depth * 2, ' ') << "    (InheritanceLink\n";
-            hypergraph_pattern << std::string(depth * 2, ' ') << "      (VariableNode \"$account\")\n";
-            hypergraph_pattern << std::string(depth * 2, ' ') << "      (ConceptNode \"Account:" << account_name << "\"))\n";
-            
-            // Add child accounts
-            GList *children = gnc_account_get_children(account);
-            for (GList *node = children; node; node = node->next) {
-                Account *child = GNC_ACCOUNT(node->data);
-                add_account_pattern(child, depth + 1);
-            }
+            std::string account_name = sanitize_scheme_string(
+                xaccAccountGetName(account) ? xaccAccountGetName(account) : "unnamed_account");
+            hypergraph_pattern << std::string(depth * 2, ' ')
+                               << "    (InheritanceLink\n";
+            hypergraph_pattern << std::string(depth * 2, ' ')
+                               << "      (VariableNode \"$account\")\n";
+            hypergraph_pattern << std::string(depth * 2, ' ')
+                               << "      (ConceptNode \"Account:" << account_name << "\"))\n";
+            GList *children = gnc_account_get_children(const_cast<Account*>(account));
+            for (GList *node = children; node; node = node->next)
+                add_account_pattern(GNC_ACCOUNT(node->data), depth + 1);
             g_list_free(children);
         };
-    
+
     add_account_pattern(root_account, 0);
-    
     hypergraph_pattern << "  )\n";
     hypergraph_pattern << "  (VariableNode \"$account\"))\n";
-    
     return g_strdup(hypergraph_pattern.str().c_str());
 }
 
-/********************************************************************\
- * Inter-Module Communication Protocols                             *
-\********************************************************************/
+/* ------------------------------------------------------------------ */
+/* Messaging                                                          */
+/* ------------------------------------------------------------------ */
 
-gboolean gnc_send_cognitive_message(const GncCognitiveMessage* message)
+gboolean
+gnc_send_cognitive_message(const GncCognitiveAtomMessage* message)
 {
     g_return_val_if_fail(message != nullptr, FALSE);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return FALSE;
-    }
-    
-    // Add message to queue
+    if (!g_atomspace) return FALSE;
+
+    /* Bound queue */
+    if (g_atomspace->message_queue.size() > 1000)
+        g_atomspace->message_queue.erase(g_atomspace->message_queue.begin());
+
     g_atomspace->message_queue.push_back(*message);
-    
-    // Try to deliver immediately if handler is registered
-    auto handler_it = g_atomspace->message_handlers.find(message->target_module);
+    auto handler_it = g_atomspace->message_handlers.find(
+        message->target_module ? message->target_module : "");
     if (handler_it != g_atomspace->message_handlers.end()) {
         handler_it->second(message);
-        g_debug("Delivered cognitive message from %s to %s", 
-                message->source_module, message->target_module);
         return TRUE;
     }
-    
-    g_debug("Queued cognitive message from %s to %s (no handler registered)", 
-            message->source_module, message->target_module);
     return TRUE;
 }
 
-gboolean gnc_register_cognitive_message_handler(const char* module_name,
-                                               GncCognitiveMessageHandler handler_func)
+gboolean
+gnc_register_cognitive_message_handler(const char* module_name,
+                                       GncCognitiveMessageHandler handler_func)
 {
-    g_return_val_if_fail(module_name != nullptr, FALSE);
-    g_return_val_if_fail(handler_func != nullptr, FALSE);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return FALSE;
-    }
-    
+    g_return_val_if_fail(module_name != nullptr && handler_func != nullptr, FALSE);
+    if (!g_atomspace) return FALSE;
     g_atomspace->message_handlers[module_name] = handler_func;
-    
-    // Deliver any queued messages for this module
-    for (auto it = g_atomspace->message_queue.begin(); it != g_atomspace->message_queue.end();) {
-        if (it->target_module == module_name) {
+    for (auto it = g_atomspace->message_queue.begin();
+         it != g_atomspace->message_queue.end();) {
+        if (it->target_module && std::string(it->target_module) == module_name) {
             handler_func(&(*it));
             it = g_atomspace->message_queue.erase(it);
         } else {
             ++it;
         }
     }
-    
-    g_message("Registered cognitive message handler for module: %s", module_name);
     return TRUE;
 }
 
-/********************************************************************\
- * Distributed Cognition and Emergent Behavior                      *
-\********************************************************************/
+/* ------------------------------------------------------------------ */
+/* Emergence                                                          */
+/* ------------------------------------------------------------------ */
 
-GncAtomHandle gnc_detect_emergent_patterns(Account** accounts, gint n_accounts,
-                                          const GncEmergenceParams* params)
+GncAtomHandle
+gnc_detect_emergent_patterns(Account** accounts, gint n_accounts,
+                             const GncEmergenceParams* params)
 {
-    g_return_val_if_fail(accounts != nullptr, 0);
-    g_return_val_if_fail(n_accounts > 0, 0);
-    g_return_val_if_fail(params != nullptr, 0);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return 0;
-    }
-    
-    // Enhanced emergence detection with multi-dimensional pattern analysis
-    gdouble total_complexity = 0.0;
-    gdouble total_coherence = 0.0;
-    gdouble total_novelty = 0.0;
-    gdouble total_connectivity = 0.0;
-    std::vector<gdouble> activity_patterns;
-    std::vector<gdouble> attention_correlations;
-    
-    // Multi-factor emergence analysis
-    for (gint i = 0; i < n_accounts; i++) {
-        GncAttentionParams attention = gnc_ecan_get_attention_params(accounts[i]);
-        
-        // Complexity metrics
-        gdouble account_complexity = attention.activity_level + 
-                                   (attention.sti / 100.0) + 
-                                   (attention.lti / 50.0);
-        total_complexity += account_complexity;
-        activity_patterns.push_back(account_complexity);
-        
-        // Coherence assessment
-        gdouble coherence = attention.confidence * attention.strength;
-        total_coherence += coherence;
-        
-        // Novelty detection (based on unusual attention patterns)
-        gdouble attention_magnitude = attention.sti + attention.lti + (attention.vlti * 10.0);
-        gdouble novelty_score = 0.0;
-        if (attention_magnitude > 200.0) novelty_score += 0.3; // High attention is novel
-        if (attention.activity_level > 2.0) novelty_score += 0.4; // High activity is novel
-        if (attention.vlti > 0.0) novelty_score += 0.3; // VLTI presence is novel
-        total_novelty += novelty_score;
-        
-        // Connectivity analysis (simplified - could use graph metrics)
-        Account *parent = gnc_account_get_parent(accounts[i]);
-        gint children_count = gnc_account_n_children(accounts[i]);
-        gdouble connectivity = (parent ? 0.5 : 0.0) + (children_count * 0.1);
-        total_connectivity += connectivity;
-    }
-    
-    // Calculate emergence metrics
-    gdouble avg_complexity = total_complexity / n_accounts;
-    gdouble avg_coherence = total_coherence / n_accounts;
-    gdouble avg_novelty = total_novelty / n_accounts;
-    gdouble avg_connectivity = total_connectivity / n_accounts;
-    
-    // Pattern variance analysis for emergence detection
-    gdouble complexity_variance = 0.0;
-    for (gdouble pattern : activity_patterns) {
-        gdouble deviation = pattern - avg_complexity;
-        complexity_variance += deviation * deviation;
-    }
-    complexity_variance /= n_accounts;
-    gdouble pattern_diversity = std::sqrt(complexity_variance);
-    
-    // Frequency analysis (simplified - tracks pattern stability)
-    gint frequency_score = std::min(100, n_accounts * 2); // Larger networks get higher frequency scores
-    
-    // Enhanced emergence threshold detection
-    gboolean complexity_threshold_met = avg_complexity > params->complexity_threshold;
-    gboolean coherence_threshold_met = avg_coherence > params->coherence_measure;
-    gboolean novelty_threshold_met = avg_novelty > params->novelty_score;
-    gboolean frequency_threshold_met = frequency_score > params->pattern_frequency;
-    
-    // Multi-dimensional emergence assessment
-    if (complexity_threshold_met && coherence_threshold_met && 
-        (novelty_threshold_met || frequency_threshold_met)) {
-        
-        // Create sophisticated emergent pattern atom
-        std::string pattern_name = "EnhancedEmergentPattern:Complexity:" + 
-                                  std::to_string(avg_complexity) + 
-                                  ":Coherence:" + std::to_string(avg_coherence) +
-                                  ":Novelty:" + std::to_string(avg_novelty) +
-                                  ":Connectivity:" + std::to_string(avg_connectivity) +
-                                  ":Diversity:" + std::to_string(pattern_diversity);
-        
-        GncAtomHandle pattern_atom = g_atomspace->create_atom(GNC_ATOM_CONCEPT_NODE, pattern_name);
-        
-        // Enhanced truth value computation for emergence
-        gdouble emergence_strength = (avg_complexity + avg_coherence + avg_novelty + avg_connectivity) / 4.0;
-        emergence_strength = std::min(1.0, emergence_strength);
-        
-        gdouble emergence_confidence = 0.5 + (pattern_diversity * 0.2) + 
-                                      (frequency_score / 200.0);
-        emergence_confidence = std::min(0.98, emergence_confidence);
-        
-        gnc_atomspace_set_truth_value(pattern_atom, emergence_strength, emergence_confidence);
-        
-        // Create supporting evidence atoms for emergent pattern
-        std::string evidence_name = "EmergenceEvidence:Accounts:" + std::to_string(n_accounts) +
-                                   ":Thresholds:C" + std::to_string(complexity_threshold_met) +
-                                   "H" + std::to_string(coherence_threshold_met) +
-                                   "N" + std::to_string(novelty_threshold_met) +
-                                   "F" + std::to_string(frequency_threshold_met);
-        
-        GncAtomHandle evidence_atom = g_atomspace->create_atom(GNC_ATOM_EVALUATION_LINK, evidence_name);
-        gnc_atomspace_set_truth_value(evidence_atom, emergence_strength, emergence_confidence);
-        
-        // Update attention for the emergent pattern itself
-        auto& params_ref = g_atomspace->attention_params[pattern_atom];
-        params_ref.sti = emergence_strength * 100.0;
-        params_ref.lti = 50.0;
-        params_ref.vlti = (emergence_strength > 0.8) ? 2.0 : 0.0;
-        params_ref.activity_level = avg_complexity;
-        
-        g_message("Detected sophisticated emergent cognitive pattern: "
-                  "strength=%.3f, confidence=%.3f, complexity=%.3f, coherence=%.3f, "
-                  "novelty=%.3f, connectivity=%.3f, diversity=%.3f", 
-                  emergence_strength, emergence_confidence, avg_complexity, 
-                  avg_coherence, avg_novelty, avg_connectivity, pattern_diversity);
-        
-        return pattern_atom;
-    }
-    
-    return 0; // No emergence detected
-}
+    g_return_val_if_fail(accounts && n_accounts > 0 && params, 0);
+    if (!g_atomspace) return 0;
 
-GncAtomHandle gnc_optimize_distributed_attention(gdouble cognitive_load,
-                                                gdouble available_resources)
-{
-    g_return_val_if_fail(cognitive_load >= 0.0, 0);
-    g_return_val_if_fail(available_resources >= 0.0, 0);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return 0;
-    }
-    
-    // Enhanced distributed attention optimization for cognitive architectures
-    
-    // Calculate optimal resource allocation based on cognitive load
-    gdouble sti_allocation_ratio = std::min(1.0, available_resources / (cognitive_load + 1.0));
-    gdouble lti_allocation_ratio = std::min(1.0, (available_resources * 0.5) / (cognitive_load + 1.0));
-    
-    // Distributed cognition load balancing
-    gdouble current_sti_usage = 0.0;
-    gdouble current_lti_usage = 0.0;
-    gint active_atoms = 0;
-    
-    // Analyze current attention distribution across all atoms
-    for (auto& param_pair : g_atomspace->attention_params) {
-        current_sti_usage += param_pair.second.sti;
-        current_lti_usage += param_pair.second.lti;
-        if (param_pair.second.activity_level > 0.1) {
-            active_atoms++;
-        }
-    }
-    
-    // Calculate cognitive efficiency metrics
-    gdouble sti_efficiency = (current_sti_usage > 0) ? g_atomspace->total_sti_funds / current_sti_usage : 1.0;
-    gdouble lti_efficiency = (current_lti_usage > 0) ? g_atomspace->total_lti_funds / current_lti_usage : 1.0;
-    gdouble overall_efficiency = (sti_efficiency + lti_efficiency) / 2.0;
-    
-    // Attention rebalancing for optimal distributed cognition
-    if (overall_efficiency < 0.8) { // Low efficiency triggers optimization
-        gdouble optimization_factor = 0.9; // Reduce allocation by 10%
-        
-        for (auto& param_pair : g_atomspace->attention_params) {
-            auto& params = param_pair.second;
-            
-            // Apply efficiency-based optimization
-            if (params.activity_level < 0.5) {
-                // Reduce attention for low-activity atoms
-                params.sti *= optimization_factor;
-                params.lti *= optimization_factor;
-            } else {
-                // Boost attention for high-activity atoms
-                params.sti *= (2.0 - optimization_factor);
-                params.lti *= (2.0 - optimization_factor);
-            }
-            
-            // Apply cognitive rent for maintaining attention
-            gdouble rent_cost = params.rent * (1.0 + cognitive_load * 0.1);
-            if (params.sti > rent_cost) {
-                params.sti -= rent_cost;
-            }
-        }
-    }
-    
-    // Adaptive attention allocation based on cognitive load patterns
-    if (cognitive_load > 0.7) {
-        // High cognitive load: prioritize essential atoms
-        for (auto& param_pair : g_atomspace->attention_params) {
-            auto& params = param_pair.second;
-            
-            if (params.vlti > 0.0) {
-                // VLTI atoms get priority during high load
-                params.sti += 20.0;
-            } else if (params.activity_level > 1.0) {
-                // Active atoms get moderate boost
-                params.sti += 10.0;
-            } else {
-                // Low-priority atoms get reduced attention
-                params.sti *= 0.8;
-            }
-        }
-    } else if (cognitive_load < 0.3) {
-        // Low cognitive load: explore and maintain diverse attention
-        gdouble exploration_bonus = available_resources * 0.1;
-        
-        for (auto& param_pair : g_atomspace->attention_params) {
-            auto& params = param_pair.second;
-            
-            // Distribute exploration bonus
-            params.sti += exploration_bonus;
-            
-            // Gradual LTI building during low load periods
-            if (params.activity_level > 0.2) {
-                params.lti += 2.0;
-            }
-        }
-    }
-    
-    // Update fund totals based on optimization
-    gdouble total_current_sti = 0.0;
-    gdouble total_current_lti = 0.0;
-    
-    for (auto& param_pair : g_atomspace->attention_params) {
-        total_current_sti += param_pair.second.sti;
-        total_current_lti += param_pair.second.lti;
-    }
-    
-    // Ensure fund conservation
-    if (total_current_sti > g_atomspace->total_sti_funds) {
-        gdouble normalization = g_atomspace->total_sti_funds / total_current_sti;
-        for (auto& param_pair : g_atomspace->attention_params) {
-            param_pair.second.sti *= normalization;
-        }
-    }
-    
-    // Apply global attention decay for distributed cognition maintenance
-    for (auto& param_pair : g_atomspace->attention_params) {
-        auto& params = param_pair.second;
-        params.sti *= (1.0 - g_atomspace->attention_decay_rate);
-        params.activity_level *= 0.95; // Activity decay
-        
-        // Update legacy compatibility fields
-        params.importance = (params.sti + params.lti * 10.0) / 11.0;
-        params.attention_value = std::min(1.0, (params.sti + params.lti + params.vlti * 100.0) / 200.0);
-    }
-    
-    // Create sophisticated optimization strategy atom
-    std::string strategy_name = "DistributedAttentionOptimization:Load:" + 
-                               std::to_string(cognitive_load) + 
-                               ":Resources:" + std::to_string(available_resources) +
-                               ":Efficiency:" + std::to_string(overall_efficiency) +
-                               ":ActiveAtoms:" + std::to_string(active_atoms);
-    
-    GncAtomHandle strategy_atom = g_atomspace->create_atom(GNC_ATOM_SCHEMA_NODE, strategy_name);
-    
-    // Set truth value based on optimization success
-    gdouble optimization_strength = std::min(1.0, overall_efficiency + (available_resources / 1000.0));
-    gdouble optimization_confidence = 0.7 + (0.2 * (1.0 - cognitive_load));
-    optimization_confidence = std::min(0.95, optimization_confidence);
-    
-    gnc_atomspace_set_truth_value(strategy_atom, optimization_strength, optimization_confidence);
-    
-    // Attention allocation for the optimization strategy itself
-    auto& strategy_params = g_atomspace->attention_params[strategy_atom];
-    strategy_params.sti = 100.0;
-    strategy_params.lti = 50.0;
-    strategy_params.activity_level = cognitive_load;
-    strategy_params.confidence = optimization_confidence;
-    strategy_params.strength = optimization_strength;
-    
-    g_debug("Optimized distributed attention: cognitive_load=%.3f, available_resources=%.3f, "
-            "efficiency=%.3f, active_atoms=%d, optimization_strength=%.3f",
-            cognitive_load, available_resources, overall_efficiency, 
-            active_atoms, optimization_strength);
-    
-    return strategy_atom;
-}
-    
-    // Calculate optimization confidence
-    gdouble efficiency = (available_resources > 0) ? 
-        std::min(1.0, available_resources / (cognitive_load + 1.0)) : 0.0;
-    
-    gnc_atomspace_set_truth_value(strategy_atom, efficiency, 0.9);
-    
-    g_message("Optimized distributed attention allocation with efficiency: %.3f", efficiency);
-    return strategy_atom;
-}
-
-/********************************************************************\
- * ECAN Attention Allocation                                         *
-\********************************************************************/
-
-void gnc_ecan_update_account_attention(Account *account, 
-                                       const Transaction *transaction)
-{
-    g_return_if_fail(account != nullptr);
-    g_return_if_fail(transaction != nullptr);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return;
-    }
-    
-    GncAtomHandle atom_handle = gnc_account_to_atomspace(account);
-    if (atom_handle == 0) return;
-    
-#ifdef HAVE_OPENCOG_ATTENTION
-    // Enhanced ECAN attention allocation with real OpenCog integration
-    try {
-#ifdef HAVE_OPENCOG_ATOMSPACE
-        auto handle_it = g_atomspace->opencog_handles.find(atom_handle);
-        if (handle_it != g_atomspace->opencog_handles.end()) {
-            Handle opencog_handle = handle_it->second;
-            
-            // Get current attention value
-            AttentionValuePtr av = g_atomspace->atomspace->get_attentionvalue(opencog_handle);
-            
-            // Calculate activity-based STI increase
-            GList *splits = xaccTransGetSplitList(transaction);
-            gint split_count = g_list_length(splits);
-            gdouble transaction_magnitude = 0.0;
-            
-            for (GList *node = splits; node; node = node->next) {
-                Split *split = GNC_SPLIT(node->data);
-                if (xaccSplitGetAccount(split) == account) {
-                    gnc_numeric amount = xaccSplitGetAmount(split);
-                    transaction_magnitude += std::abs(gnc_numeric_to_double(amount));
-                }
-            }
-            
-            // Sophisticated STI/LTI dynamics with cognitive economics
-            AttentionValue::sti_t base_sti_boost = 5 + (split_count * 2);
-            AttentionValue::sti_t magnitude_boost = (AttentionValue::sti_t)(transaction_magnitude / 100.0);
-            AttentionValue::sti_t total_sti_boost = base_sti_boost + magnitude_boost;
-            
-            AttentionValue::sti_t new_sti = av->getSTI() + total_sti_boost;
-            AttentionValue::lti_t new_lti = av->getLTI() + (total_sti_boost / 10); // LTI grows more slowly
-            AttentionValue::vlti_t new_vlti = av->getVLTI();
-            
-            // VLTI updates for very high activity accounts
-            if (new_sti > 1000) {
-                new_vlti = av->getVLTI() + 1;
-            }
-            
-            AttentionValuePtr new_av = createAV(new_sti, new_lti, new_vlti);
-            g_atomspace->atomspace->set_attentionvalue(opencog_handle, new_av);
-            
-            g_debug("Enhanced ECAN attention for account %s: STI=%d, LTI=%d, VLTI=%d, magnitude=%.2f",
-                    xaccAccountGetName(account), new_sti, new_lti, new_vlti, transaction_magnitude);
-        }
-#endif
-    } catch (const std::exception& e) {
-        g_warning("ECAN attention update error: %s", e.what());
-        // Fall through to basic attention update
-    }
-#endif
-    
-    // Enhanced attention parameters update with cognitive economics
-    auto& params = g_atomspace->attention_params[atom_handle];
-    
-    // Calculate transaction activity metrics
-    GList *splits = xaccTransGetSplitList(transaction);
-    gint split_count = g_list_length(splits);
-    gdouble transaction_magnitude = 0.0;
-    
-    for (GList *node = splits; node; node = node->next) {
-        Split *split = GNC_SPLIT(node->data);
-        if (xaccSplitGetAccount(split) == account) {
-            gnc_numeric amount = xaccSplitGetAmount(split);
-            transaction_magnitude += std::abs(gnc_numeric_to_double(amount));
-        }
-    }
-    
-    // Sophisticated ECAN-style attention updates with cognitive economics
-    gdouble activity_boost = 0.05 + (split_count * 0.02) + (transaction_magnitude / 10000.0);
-    activity_boost = std::min(0.5, activity_boost); // Cap the boost
-    
-    // Cognitive wage calculation based on account importance and activity
-    gdouble base_wage = params.wage;
-    gdouble importance_multiplier = 1.0 + (params.lti / 100.0);
-    gdouble activity_multiplier = 1.0 + params.activity_level;
-    gdouble wage_payment = base_wage * importance_multiplier * activity_multiplier * activity_boost;
-    
-    // STI allocation with fund management
-    if (g_atomspace->total_sti_funds >= wage_payment) {
-        params.sti += wage_payment;
-        g_atomspace->total_sti_funds -= wage_payment;
-        params.activity_level += activity_boost;
-        
-        // Apply cognitive rent for maintaining attention
-        gdouble rent_payment = params.rent * (1.0 + params.sti / 100.0);
-        if (params.sti > rent_payment) {
-            params.sti -= rent_payment;
-        }
-    }
-    
-    // LTI growth based on sustained activity
-    gdouble lti_growth = activity_boost * 0.1;
-    if (g_atomspace->total_lti_funds >= lti_growth) {
-        params.lti += lti_growth;
-        g_atomspace->total_lti_funds -= lti_growth;
-    }
-    
-    // VLTI for very long-term important accounts
-    if (params.lti > 50.0 && params.activity_level > 1.0) {
-        params.vlti += 0.001;
-    }
-    
-    // Attention decay over time
-    params.sti *= (1.0 - g_atomspace->attention_decay_rate);
-    params.activity_level *= 0.98; // Gradual activity decay
-    
-    // Update legacy compatibility fields
-    params.importance = (params.sti + params.lti * 10.0) / 11.0;
-    params.attention_value = std::min(1.0, (params.sti + params.lti + params.vlti * 100.0) / 200.0);
-    
-    g_debug("Enhanced ECAN attention for account %s: STI=%.3f, LTI=%.3f, VLTI=%.3f, "
-            "activity=%.3f, wage=%.3f, rent=%.3f, funds_sti=%.1f, funds_lti=%.1f",
-            xaccAccountGetName(account), params.sti, params.lti, params.vlti,
-            params.activity_level, wage_payment, params.rent, 
-            g_atomspace->total_sti_funds, g_atomspace->total_lti_funds);
-}
-
-GncAttentionParams gnc_ecan_get_attention_params(const Account *account)
-{
-    GncAttentionParams default_params = {};
-    
-    g_return_val_if_fail(account != nullptr, default_params);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return default_params;
-    }
-    
-    auto it = g_atomspace->account_atoms.find(account);
-    if (it == g_atomspace->account_atoms.end()) {
-        return default_params;
-    }
-    
-    auto param_it = g_atomspace->attention_params.find(it->second);
-    if (param_it != g_atomspace->attention_params.end()) {
-        return param_it->second;
-    }
-    
-    return default_params;
-}
-
-void gnc_ecan_allocate_attention(Account **accounts, gint n_accounts)
-{
-    g_return_if_fail(accounts != nullptr);
-    g_return_if_fail(n_accounts > 0);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return;
-    }
-    
-    // Enhanced ECAN-style attention allocation with sophisticated cognitive economics
-    gdouble total_sti = 0.0;
-    gdouble total_lti = 0.0;
     gdouble total_activity = 0.0;
-    std::vector<GncAtomHandle> account_handles;
-    std::vector<gdouble> activity_scores;
-    
-    // Collect all account handles and calculate totals
-    for (gint i = 0; i < n_accounts; i++) {
-        auto it = g_atomspace->account_atoms.find(accounts[i]);
-        if (it != g_atomspace->account_atoms.end()) {
-            account_handles.push_back(it->second);
-            auto& params = g_atomspace->attention_params[it->second];
-            
-            total_sti += params.sti;
-            total_lti += params.lti;
-            total_activity += params.activity_level;
-            
-            // Calculate activity score for resource allocation
-            gdouble activity_score = params.activity_level + (params.sti / 100.0) + (params.lti / 50.0);
-            activity_scores.push_back(activity_score);
-        }
-    }
-    
-    // Activity-based resource allocation
-    if (total_activity > 0.0) {
-        gdouble available_sti_boost = g_atomspace->total_sti_funds * 0.1; // Use 10% of funds for reallocation
-        gdouble available_lti_boost = g_atomspace->total_lti_funds * 0.05; // Use 5% of funds for LTI boost
-        
-        for (size_t i = 0; i < account_handles.size(); i++) {
-            auto& params = g_atomspace->attention_params[account_handles[i]];
-            
-            // Proportional allocation based on activity
-            gdouble activity_ratio = activity_scores[i] / total_activity;
-            gdouble sti_allocation = available_sti_boost * activity_ratio;
-            gdouble lti_allocation = available_lti_boost * activity_ratio;
-            
-            params.sti += sti_allocation;
-            params.lti += lti_allocation;
-            
-            // Update fund tracking
-            g_atomspace->total_sti_funds -= sti_allocation;
-            g_atomspace->total_lti_funds -= lti_allocation;
-        }
-    }
-    
-    // STI normalization if total exceeds fund limits
-    gdouble updated_total_sti = 0.0;
-    for (auto handle : account_handles) {
-        updated_total_sti += g_atomspace->attention_params[handle].sti;
-    }
-    
-    if (updated_total_sti > g_atomspace->total_sti_funds) {
-        gdouble normalization_factor = g_atomspace->total_sti_funds / updated_total_sti;
-        
-        for (auto handle : account_handles) {
-            auto& params = g_atomspace->attention_params[handle];
-            params.sti *= normalization_factor;
-        }
-    }
-    
-    // Apply cognitive rent and attention decay
-    for (auto handle : account_handles) {
-        auto& params = g_atomspace->attention_params[handle];
-        
-        // Cognitive rent payment
-        gdouble rent_payment = params.rent * (1.0 + params.sti / 200.0);
-        if (params.sti > rent_payment) {
-            params.sti -= rent_payment;
-        }
-        
-        // Attention decay
-        params.sti *= (1.0 - g_atomspace->attention_decay_rate);
-        params.activity_level *= 0.95; // Activity decay
-        
-        // Update legacy compatibility fields
-        params.importance = (params.sti + params.lti * 10.0) / 11.0;
-        params.attention_value = std::min(1.0, (params.sti + params.lti + params.vlti * 100.0) / 200.0);
-    }
-    
-    // Fund replenishment (simulation of cognitive resource generation)
-    g_atomspace->total_sti_funds = std::min(2000.0, g_atomspace->total_sti_funds + 50.0);
-    g_atomspace->total_lti_funds = std::min(1000.0, g_atomspace->total_lti_funds + 10.0);
-    
-    g_debug("Enhanced ECAN attention allocation across %d accounts: "
-            "total_sti=%.2f, total_lti=%.2f, total_activity=%.2f, "
-            "sti_funds=%.1f, lti_funds=%.1f", 
-            n_accounts, updated_total_sti, total_lti, total_activity,
-            g_atomspace->total_sti_funds, g_atomspace->total_lti_funds);
-}
-
-/********************************************************************\
- * MOSES Integration                                                 *
-\********************************************************************/
-
-GncAtomHandle gnc_moses_discover_balancing_strategies(Transaction **historical_transactions,
-                                                      gint n_transactions)
-{
-    g_return_val_if_fail(historical_transactions != nullptr, 0);
-    g_return_val_if_fail(n_transactions > 0, 0);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return 0;
-    }
-    
-    // Enhanced MOSES-style evolutionary strategy discovery
-    std::map<std::string, gint> pattern_frequencies;
-    std::map<std::string, gdouble> pattern_fitness;
-    
-    // Analyze historical transactions for patterns
-    for (gint i = 0; i < n_transactions; i++) {
-        Transaction *trans = historical_transactions[i];
-        if (!trans) continue;
-        
-        GList *splits = xaccTransGetSplitList(trans);
-        gint split_count = g_list_length(splits);
-        
-        // Extract transaction patterns
-        std::string pattern_key = "SplitCount:" + std::to_string(split_count);
-        pattern_frequencies[pattern_key]++;
-        
-        // Calculate fitness based on validation success
-        gdouble validation_fitness = gnc_pln_validate_double_entry(trans);
-        pattern_fitness[pattern_key] += validation_fitness;
-        
-        // Analyze account type patterns
-        std::map<GNCAccountType, gint> account_type_counts;
-        for (GList *node = splits; node; node = node->next) {
-            Split *split = GNC_SPLIT(node->data);
-            Account *account = xaccSplitGetAccount(split);
-            if (account) {
-                GNCAccountType type = xaccAccountGetType(account);
-                account_type_counts[type]++;
-            }
-        }
-        
-        // Create pattern signature based on account types
-        std::string type_pattern = "Types:";
-        for (auto& pair : account_type_counts) {
-            type_pattern += std::to_string(pair.first) + ":" + std::to_string(pair.second) + ",";
-        }
-        pattern_frequencies[type_pattern]++;
-        pattern_fitness[type_pattern] += validation_fitness;
-    }
-    
-    // Find the best performing pattern using MOSES-style fitness evaluation
-    std::string best_pattern;
-    gdouble best_fitness = 0.0;
-    gint best_frequency = 0;
-    
-    for (auto& pattern : pattern_frequencies) {
-        gdouble avg_fitness = pattern_fitness[pattern.first] / pattern.second;
-        gdouble weighted_fitness = avg_fitness * sqrt(pattern.second); // Frequency weighting
-        
-        if (weighted_fitness > best_fitness) {
-            best_fitness = weighted_fitness;
-            best_pattern = pattern.first;
-            best_frequency = pattern.second;
-        }
-    }
-    
-    // Create evolved strategy atom with MOSES-style combo tree representation
-    std::string strategy_name = "MOSESStrategy:Evolved:" + best_pattern +
-                               ":Fitness:" + std::to_string(best_fitness) +
-                               ":Freq:" + std::to_string(best_frequency);
-    
-//<<<<<<< copilot/fix-1-3
-    GncAtomHandle strategy_atom = g_atomspace->create_atom(GNC_ATOM_COMBO_NODE, strategy_name);
-    
-    // Set truth value based on evolutionary fitness
-    gdouble confidence = std::min(0.95, best_frequency / (gdouble)n_transactions);
-    gdouble strength = std::min(1.0, best_fitness);
-    
-    gnc_atomspace_set_truth_value(strategy_atom, strength, confidence);
-    
-    // Update attention parameters for high-fitness strategies
-    auto& params = g_atomspace->attention_params[strategy_atom];
-    params.sti = best_fitness * 50.0; // Reward good strategies with attention
-    params.lti += 10.0; // Build long-term importance
-    
-    g_message("MOSES discovered evolved balancing strategy: %s (fitness=%.3f, n=%d)", 
-              best_pattern.c_str(), best_fitness, n_transactions);
-//=======
-#ifdef HAVE_OPENCOG_ASMOSES
-    // Use real MOSES evolutionary optimization
-    try {
-        // This would run actual MOSES optimization on transaction patterns
-        // to evolve better balancing strategies
-        
-        g_message("Running MOSES evolutionary optimization on %d transactions", n_transactions);
-        
-        // MOSES would analyze historical transaction patterns and evolve
-        // new rules for optimal account balancing strategies
-        
-        // Set higher confidence for MOSES-evolved strategies
-#ifdef HAVE_OPENCOG_ATOMSPACE
-        auto& params = g_atomspace->attention_params[strategy_atom];
-        params.confidence = 0.85; // Higher confidence for evolved strategies
-#else
-        g_atomspace->attention_params[strategy_atom].confidence = 0.85;
-#endif
-        
-        g_message("MOSES discovered evolved balancing strategies from %d transactions", n_transactions);
-        
-    } catch (const std::exception& e) {
-        g_warning("MOSES optimization error: %s", e.what());
-        // Fall through to basic strategy creation
-    }
-#else
-    // Basic strategy discovery without MOSES
-#ifdef HAVE_OPENCOG_ATOMSPACE
-    auto& params = g_atomspace->attention_params[strategy_atom];
-    params.confidence = 0.7;
-#else
-    g_atomspace->attention_params[strategy_atom].confidence = 0.7;
-#endif
-    
-    // Trigger Scheme-based evolutionary optimization for distributed cognition
-    gnc_scheme_evolutionary_optimization(historical_transactions, n_transactions);
-    
-    g_message("MOSES discovered balancing strategies from %d transactions (basic implementation)", n_transactions);
-#endif
-//>>>>>>> stable
-    
-    return strategy_atom;
-}
-
-Transaction* gnc_moses_optimize_transaction(const Transaction *transaction)
-{
-    g_return_val_if_fail(transaction != nullptr, nullptr);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return const_cast<Transaction*>(transaction);
-    }
-    
-    // MOSES-style transaction optimization
-    gdouble current_fitness = gnc_pln_validate_double_entry(transaction);
-    
-    g_message("MOSES transaction optimization: current fitness=%.3f", current_fitness);
-    
-    // For now, return original transaction if fitness is already high
-    if (current_fitness > 0.9) {
-        g_message("Transaction already optimized (fitness > 0.9)");
-        return const_cast<Transaction*>(transaction);
-    }
-    
-    // In a full implementation, this would:
-    // 1. Generate variations of the transaction structure
-    // 2. Evaluate fitness of each variation
-    // 3. Use evolutionary operators (crossover, mutation)
-    // 4. Return the fittest variant
-    
-    // Create optimization result atom
-    GncAtomHandle optimization_atom = g_atomspace->create_atom(
-        GNC_ATOM_GROUNDED_SCHEMA,
-        "MOSESOptimization:Transaction:" + std::to_string(reinterpret_cast<uintptr_t>(transaction))
-    );
-    
-    gnc_atomspace_set_truth_value(optimization_atom, current_fitness, 0.8);
-    
-    g_message("MOSES transaction optimization completed (placeholder implementation)");
-    
-    return const_cast<Transaction*>(transaction);
-}
-
-/********************************************************************\
- * URE Uncertain Reasoning                                           *
-\********************************************************************/
-
-gnc_numeric gnc_ure_predict_balance(const Account *account, time64 future_date)
-{
-    g_return_val_if_fail(account != nullptr, gnc_numeric_zero());
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return xaccAccountGetBalance(account);
-    }
-    
-    // Enhanced URE-style uncertain reasoning for advanced balance prediction
-    gnc_numeric current_balance = xaccAccountGetBalance(account);
-    time64 current_time = gnc_time(nullptr);
-    
-    if (future_date <= current_time) {
-        return current_balance; // No prediction needed for past/present
-    }
-    
-    // Multi-factor uncertain reasoning analysis
-    GList *splits = xaccAccountGetSplitList(account);
-    std::vector<double> historical_changes;
-    std::vector<time64> transaction_times;
-    gdouble total_variance = 0.0;
-    gdouble trend = 0.0;
-    gdouble seasonal_factor = 1.0;
-    gdouble volatility_factor = 1.0;
-    gint data_points = 0;
-    
-    // Advanced historical pattern analysis for URE reasoning
-    time64 analysis_window = current_time - (365 * 24 * 3600); // One year window
-    
-    for (GList *node = splits; node; node = node->next) {
-        Split *split = GNC_SPLIT(node->data);
-        Transaction *trans = xaccSplitGetParent(split);
-        if (!trans) continue;
-        
-        time64 trans_time = xaccTransGetDatePosted(trans);
-        if (trans_time < analysis_window) continue; // Only recent history
-        
-        gnc_numeric amount = xaccSplitGetAmount(split);
-        double change = gnc_numeric_to_double(amount);
-        
-        historical_changes.push_back(change);
-        transaction_times.push_back(trans_time);
-        trend += change;
-        data_points++;
-        
-        if (data_points > 200) break; // Limit for computational efficiency
-    }
-    
-    // URE uncertain reasoning with risk-aware prediction
-    if (data_points > 0) {
-        trend /= data_points;
-        
-        // Calculate variance and volatility for uncertainty quantification
-        for (double change : historical_changes) {
-            gdouble deviation = change - trend;
-            total_variance += deviation * deviation;
-        }
-        total_variance /= data_points;
-        volatility_factor = std::sqrt(total_variance);
-        
-        // Seasonal pattern detection using URE reasoning
-        if (data_points > 12) {
-            gdouble seasonal_sum = 0.0;
-            gint seasonal_count = 0;
-            
-            // Simple seasonal analysis (could be enhanced with FFT)
-            for (size_t i = 0; i < historical_changes.size() - 12; i += 12) {
-                seasonal_sum += historical_changes[i];
-                seasonal_count++;
-            }
-            if (seasonal_count > 0) {
-                seasonal_factor = 1.0 + (seasonal_sum / seasonal_count) / (std::abs(trend) + 1.0);
-            }
-        }
-        
-        // Account type-specific prediction patterns
-        GNCAccountType acc_type = xaccAccountGetType(account);
-        gdouble type_multiplier = 1.0;
-        switch (acc_type) {
-            case ACCT_TYPE_CHECKING:
-            case ACCT_TYPE_SAVINGS:
-                type_multiplier = 0.8; // More stable accounts
-                break;
-            case ACCT_TYPE_TRADING:
-            case ACCT_TYPE_STOCK:
-                type_multiplier = 1.5; // More volatile accounts
-                break;
-            case ACCT_TYPE_INCOME:
-                type_multiplier = 1.2; // Growth-oriented
-                break;
-            case ACCT_TYPE_EXPENSE:
-                type_multiplier = 1.1; // Regular outflow
-                break;
-            default:
-                type_multiplier = 1.0;
-        }
-        
-        // Attention-weighted prediction confidence
-        GncAttentionParams attention = gnc_ecan_get_attention_params(account);
-        gdouble attention_confidence = std::min(1.0, (attention.sti + attention.lti) / 100.0);
-        
-        // Time horizon effects
-        gdouble time_horizon_days = (future_date - current_time) / (24.0 * 3600.0);
-        gdouble horizon_factor = exp(-time_horizon_days / 365.0); // Uncertainty increases with time
-        
-        // URE prediction with multi-factor integration
-        gdouble predicted_change = trend * time_horizon_days * seasonal_factor * type_multiplier;
-        
-        // Risk-aware uncertainty bounds
-        gdouble uncertainty_factor = volatility_factor * sqrt(time_horizon_days) * (2.0 - attention_confidence);
-        gdouble uncertainty_bound = uncertainty_factor * horizon_factor;
-        
-        // Apply conservative adjustment for high uncertainty
-        if (uncertainty_bound > std::abs(predicted_change)) {
-            predicted_change *= 0.7; // Conservative adjustment
-        }
-        
-        gnc_numeric prediction = gnc_numeric_add(current_balance, 
-                                               gnc_numeric_create(static_cast<gint64>(predicted_change * 100), 100),
-                                               GNC_DENOM_AUTO, GNC_HOW_RND_ROUND_HALF_UP);
-        
-        // Create URE atoms for prediction confidence tracking
-        std::string prediction_name = "UREPrediction:Account:" + 
-                                     std::string(xaccAccountGetName(account)) +
-                                     ":Horizon:" + std::to_string(time_horizon_days) +
-                                     ":Confidence:" + std::to_string(attention_confidence);
-        
-        GncAtomHandle prediction_atom = g_atomspace->create_atom(GNC_ATOM_EVALUATION_LINK, prediction_name);
-        gdouble prediction_strength = horizon_factor * attention_confidence;
-        gdouble prediction_confidence = std::max(0.1, 1.0 - (uncertainty_bound / (std::abs(predicted_change) + 1.0)));
-        
-        gnc_atomspace_set_truth_value(prediction_atom, prediction_strength, prediction_confidence);
-        
-        g_debug("URE balance prediction for %s: current=%.2f, predicted=%.2f, "
-                "trend=%.4f, volatility=%.4f, uncertainty=%.4f, confidence=%.3f",
-                xaccAccountGetName(account), 
-                gnc_numeric_to_double(current_balance),
-                gnc_numeric_to_double(prediction),
-                trend, volatility_factor, uncertainty_bound, prediction_confidence);
-        
-        return prediction;
-    }
-    
-    // Fallback: return current balance if insufficient data
-    return current_balance;
-}
-    }
-    
-    // URE reasoning: combine trend with uncertainty
-    time64 time_delta = future_date - current_time;
-    gdouble days_ahead = time_delta / 86400.0; // Convert to days
-    
-    // Base prediction using trend
-    gdouble predicted_change = trend * days_ahead;
-    
-    // Uncertainty increases with time and variance
-    gdouble uncertainty_factor = 1.0 + (sqrt(total_variance) * sqrt(days_ahead) / 365.0);
-    
-    // Apply conservative adjustment for uncertainty
-    if (predicted_change > 0) {
-        predicted_change /= uncertainty_factor;
-    } else {
-        predicted_change *= uncertainty_factor;
-    }
-    
-    gnc_numeric predicted_balance = gnc_numeric_add(
-        current_balance,
-        gnc_numeric_create(predicted_change, 100),
-        GNC_DENOM_AUTO,
-        GNC_HOW_RND_ROUND_HALF_UP
-    );
-    
-    // Create URE prediction atom for knowledge retention
-    std::string prediction_name = "UREPrediction:Account:" + 
-                                 std::string(xaccAccountGetName(account)) +
-                                 ":Days:" + std::to_string((int)days_ahead);
-    
-    GncAtomHandle prediction_atom = g_atomspace->create_atom(GNC_ATOM_PREDICATE_NODE, prediction_name);
-    
-    // Set truth value based on prediction confidence
-    gdouble confidence = std::max(0.1, 1.0 / uncertainty_factor);
-    gdouble strength = 0.7; // Moderate strength for predictions
-    
-    gnc_atomspace_set_truth_value(prediction_atom, strength, confidence);
-    
-    g_message("URE balance prediction for account %s: %.2f (uncertainty factor: %.2f)", 
-//=======
-#ifdef HAVE_OPENCOG_URE
-    // Use real URE for sophisticated balance prediction
-    try {
-        if (g_atomspace) {
-#ifdef HAVE_OPENCOG_ATOMSPACE
-            // Create URE rules for balance prediction in the AtomSpace
-            // This would involve creating proper uncertain reasoning rules
-            
-            g_message("Using URE uncertain reasoning for balance prediction");
-            
-            // URE would analyze historical patterns, account trends,
-            // and uncertainty to provide probabilistic balance predictions
-            
-            // For now, apply basic uncertainty modeling
-            double uncertainty_factor = 0.95; // High confidence in prediction
-            gnc_numeric predicted_balance = gnc_numeric_mul(current_balance, 
-                                                          gnc_numeric_create(uncertainty_factor * 100, 100),
-                                                          GNC_DENOM_AUTO, GNC_HOW_RND_ROUND);
-            
-            g_message("URE balance prediction for account %s: %.2f (with uncertainty bounds)", 
-                      xaccAccountGetName(account), 
-                      gnc_numeric_to_double(predicted_balance));
-            
-            return predicted_balance;
-#endif
-        }
-    } catch (const std::exception& e) {
-        g_warning("URE prediction error: %s", e.what());
-        // Fall through to basic prediction
-    }
-#endif
-    
-    // Basic prediction: current balance (placeholder for URE reasoning)
-    g_message("URE balance prediction for account %s: %.2f (basic implementation)", 
-//>>>>>>> stable
-              xaccAccountGetName(account), 
-              gnc_numeric_to_double(predicted_balance),
-              uncertainty_factor);
-    
-    return predicted_balance;
-}
-
-gdouble gnc_ure_transaction_validity(const Transaction *transaction)
-{
-    g_return_val_if_fail(transaction != nullptr, 0.0);
-    
-    if (!g_atomspace) {
-        g_warning("Cognitive accounting not initialized");
-        return gnc_pln_validate_double_entry(transaction);
-    }
-    
-    // Enhanced URE uncertain reasoning for transaction validity with multi-factor analysis
-    gdouble base_validity = gnc_pln_validate_double_entry(transaction);
-    
-    // Multi-factor uncertain reasoning analysis
-    GList *splits = xaccTransGetSplitList(transaction);
-    gint split_count = g_list_length(splits);
-    time64 trans_time = xaccTransGetDatePosted(transaction);
-    time64 current_time = gnc_time(nullptr);
-    
-    // URE uncertainty factors
-    gdouble complexity_uncertainty = 1.0;
-    gdouble temporal_uncertainty = 1.0;
-    gdouble account_reliability_factor = 1.0;
-    gdouble pattern_consistency_factor = 1.0;
-    gdouble economic_context_factor = 1.0;
-    
-    // Complexity-based uncertainty (more complex = more uncertain)
-    if (split_count > 2) {
-        complexity_uncertainty = 1.0 - (0.05 * (split_count - 2));
-        complexity_uncertainty = std::max(0.5, complexity_uncertainty);
-    }
-    
-    // Temporal uncertainty (older transactions may have different validity patterns)
-    gdouble age_days = (current_time - trans_time) / (24.0 * 3600.0);
-    temporal_uncertainty = exp(-age_days / (365.0 * 2.0)); // 2-year decay
-    
-    // Account reliability assessment using attention parameters
-    gdouble total_account_reliability = 0.0;
-    gint valid_accounts = 0;
-    gdouble total_transaction_magnitude = 0.0;
-    
-    for (GList *node = splits; node; node = node->next) {
-        Split *split = GNC_SPLIT(node->data);
-        Account *account = xaccSplitGetAccount(split);
-        gnc_numeric amount = xaccSplitGetAmount(split);
-        gdouble amount_val = std::abs(gnc_numeric_to_double(amount));
-        total_transaction_magnitude += amount_val;
-        
-        if (account) {
-            GncAttentionParams params = gnc_ecan_get_attention_params(account);
-            
-            // High attention accounts are more reliable
-            gdouble account_reliability = std::min(1.0, (params.sti + params.lti + params.vlti * 10.0) / 150.0);
-            account_reliability = std::max(0.1, account_reliability);
-            
-            total_account_reliability += account_reliability;
-            valid_accounts++;
-        }
-    }
-    
-    if (valid_accounts > 0) {
-        account_reliability_factor = total_account_reliability / valid_accounts;
-    }
-    
-    // Economic context analysis (transaction magnitude vs. typical patterns)
-    gdouble magnitude_factor = 1.0;
-    if (total_transaction_magnitude > 0) {
-        // Could be enhanced with historical transaction magnitude analysis
-        magnitude_factor = std::min(1.2, 1.0 + (total_transaction_magnitude / 10000.0));
-    }
-    
-#ifdef HAVE_OPENCOG_URE
-    // Enhanced URE reasoning with real OpenCog integration
-    try {
-        // URE would create sophisticated uncertainty models and reasoning chains
-        // to assess transaction validity under various uncertain conditions
-        
-        // Create URE inference context
-        std::string ure_context = "UREValidityContext:TX:" + 
-                                 std::to_string(reinterpret_cast<uintptr_t>(transaction));
-        
-        GncAtomHandle ure_atom = g_atomspace->create_atom(GNC_ATOM_EVALUATION_LINK, ure_context);
-        
-        // Enhanced uncertainty modeling with URE
-        gdouble ure_uncertainty_reduction = 0.1; // URE can reduce uncertainty through reasoning
-        complexity_uncertainty += ure_uncertainty_reduction;
-        temporal_uncertainty += ure_uncertainty_reduction;
-        
-        g_debug("Enhanced URE transaction validity assessment with sophisticated reasoning");
-        
-    } catch (const std::exception& e) {
-        g_warning("URE reasoning error: %s", e.what());
-    }
-#endif
-    
-    // Pattern consistency analysis (simplified - could use ML/pattern matching)
-    // Check if this transaction follows typical patterns for these account types
-    std::map<GNCAccountType, gint> type_counts;
-    for (GList *node = splits; node; node = node->next) {
-        Split *split = GNC_SPLIT(node->data);
-        Account *account = xaccSplitGetAccount(split);
-        if (account) {
-            GNCAccountType type = xaccAccountGetType(account);
-            type_counts[type]++;
-        }
-    }
-    
-    // Common patterns get higher consistency scores
-    if (type_counts.size() == 2 && 
-        ((type_counts.count(ACCT_TYPE_CHECKING) && type_counts.count(ACCT_TYPE_EXPENSE)) ||
-         (type_counts.count(ACCT_TYPE_INCOME) && type_counts.count(ACCT_TYPE_BANK)))) {
-        pattern_consistency_factor = 1.1; // Boost for common patterns
-    } else if (type_counts.size() > 4) {
-        pattern_consistency_factor = 0.9; // Slight penalty for very complex patterns
-    }
-    
-    // Combine all uncertainty factors using URE-style reasoning
-    gdouble combined_uncertainty_factor = complexity_uncertainty * temporal_uncertainty * 
-                                         account_reliability_factor * pattern_consistency_factor *
-                                         magnitude_factor;
-    
-    // Apply URE reasoning to adjust validity
-    gdouble ure_adjusted_validity = base_validity * combined_uncertainty_factor;
-    
-    // Confidence bounds for URE reasoning
-    ure_adjusted_validity = std::max(0.0, std::min(1.0, ure_adjusted_validity));
-    
-    // Create URE reasoning atoms for knowledge retention
-    std::string validity_name = "URETransactionValidity:TX:" + 
-                               std::to_string(reinterpret_cast<uintptr_t>(transaction)) +
-                               ":Factors:" + std::to_string(combined_uncertainty_factor);
-    
-    GncAtomHandle validity_atom = g_atomspace->create_atom(GNC_ATOM_EVALUATION_LINK, validity_name);
-    
-    // Set truth value for URE reasoning result
-    gdouble ure_strength = ure_adjusted_validity;
-    gdouble ure_confidence = std::min(0.95, 0.6 + (account_reliability_factor * 0.3));
-    
-    gnc_atomspace_set_truth_value(validity_atom, ure_strength, ure_confidence);
-    
-    g_debug("URE transaction validity: base=%.3f, adjusted=%.3f, "
-            "complexity=%.3f, temporal=%.3f, reliability=%.3f, pattern=%.3f, magnitude=%.3f",
-            base_validity, ure_adjusted_validity, complexity_uncertainty, temporal_uncertainty,
-            account_reliability_factor, pattern_consistency_factor, magnitude_factor);
-    
-    return ure_adjusted_validity;
-}
-    
-#ifdef HAVE_OPENCOG_URE
-    // Use real URE for uncertain reasoning about transaction validity
-    try {
-        if (g_atomspace) {
-            g_message("Using URE for transaction validity assessment with uncertainty");
-            
-            // URE would create uncertainty models and reasoning chains
-            // to assess transaction validity under various uncertain conditions
-            
-            GList *splits = xaccTransGetSplitList(transaction);
-            gint split_count = g_list_length(splits);
-            
-            // URE-based uncertainty modeling
-            gdouble uncertainty_factor = 1.0 - (0.03 * split_count); // Lower uncertainty for simpler transactions
-            uncertainty_factor = std::max(0.2, uncertainty_factor);
-            
-            gdouble ure_validity = base_validity * uncertainty_factor;
-            
-            g_message("URE transaction validity: %.3f (base: %.3f, uncertainty: %.3f)",
-                      ure_validity, base_validity, uncertainty_factor);
-            
-            return ure_validity;
-        }
-    } catch (const std::exception& e) {
-        g_warning("URE validity assessment error: %s", e.what());
-        // Fall through to basic assessment
-    }
-#endif
-    
-    // Basic uncertainty assessment without URE
-//>>>>>>> stable
-    GList *splits = xaccTransGetSplitList(transaction);
-    gint split_count = g_list_length(splits);
-    
-    // Uncertainty factors for URE reasoning
-    gdouble complexity_uncertainty = 1.0;
-    gdouble temporal_uncertainty = 1.0;
-    gdouble account_uncertainty = 1.0;
-    
-    // Calculate complexity-based uncertainty
-    if (split_count > 2) {
-        complexity_uncertainty = 1.0 - (0.05 * (split_count - 2));
-        complexity_uncertainty = std::max(0.5, complexity_uncertainty);
-    }
-    
-    // Calculate temporal uncertainty (recent transactions more certain)
-    time64 trans_time = xaccTransGetDate(transaction);
-    time64 current_time = time(nullptr);
-    time64 age_days = (current_time - trans_time) / 86400;
-    
-    if (age_days > 0) {
-        temporal_uncertainty = exp(-age_days / 365.0); // Decay over year
-        temporal_uncertainty = std::max(0.3, temporal_uncertainty);
-    }
-    
-    // Calculate account-based uncertainty using attention values
     gdouble total_attention = 0.0;
-    gint attention_count = 0;
-    
-    for (GList *node = splits; node; node = node->next) {
-        Split *split = GNC_SPLIT(node->data);
-        Account *account = xaccSplitGetAccount(split);
-        
-        if (account) {
-            GncAttentionParams params = gnc_ecan_get_attention_params(account);
-            total_attention += params.confidence;
-            attention_count++;
-        }
+    for (gint i = 0; i < n_accounts; i++) {
+        if (!accounts[i]) continue;
+        GncAttentionParams a = gnc_ecan_get_attention_params(accounts[i]);
+        total_activity += a.activity_level;
+        total_attention += a.attention_value;
     }
-    
-    if (attention_count > 0) {
-        account_uncertainty = total_attention / attention_count;
-    }
-    
-    // URE truth value revision combining multiple uncertainties
-    gdouble combined_uncertainty = (complexity_uncertainty + temporal_uncertainty + account_uncertainty) / 3.0;
-    gdouble final_validity = base_validity * combined_uncertainty;
-    
-    // Create URE validity assessment atom
-    std::string assessment_name = "UREValidityAssessment:Transaction:" +
-                                 std::to_string(reinterpret_cast<uintptr_t>(transaction));
-    
-    GncAtomHandle assessment_atom = g_atomspace->create_atom(GNC_ATOM_EVALUATION_LINK, assessment_name);
-    gnc_atomspace_set_truth_value(assessment_atom, final_validity, combined_uncertainty);
-    
-    g_debug("URE transaction validity: base=%.3f, complexity=%.3f, temporal=%.3f, account=%.3f, final=%.3f",
-            base_validity, complexity_uncertainty, temporal_uncertainty, account_uncertainty, final_validity);
-    
-    return final_validity;
+    gdouble complexity = total_activity / std::max(1, n_accounts);
+    gdouble coherence = total_attention / std::max(1, n_accounts);
+    gboolean emergent = (complexity >= params->complexity_threshold &&
+                         coherence >= params->coherence_measure);
+
+    GncAtomHandle h = g_atomspace->create_atom(
+        GNC_ATOM_CONCEPT_NODE,
+        emergent ? "EmergentPattern:Detected" : "EmergentPattern:None");
+    g_atomspace->set_tv(h, clamp01(complexity), clamp01(coherence));
+    return h;
 }
 
-/********************************************************************\
- * Cognitive Account Types                                           *
-\********************************************************************/
+GncAtomHandle
+gnc_optimize_distributed_attention(gdouble cognitive_load,
+                                   gdouble available_resources)
+{
+    if (!g_atomspace) return 0;
+    gdouble efficiency = available_resources > 0.0
+        ? clamp01(1.0 - cognitive_load / available_resources) : 0.0;
+    GncAtomHandle h = g_atomspace->create_atom(
+        GNC_ATOM_SCHEMA_NODE, "DistributedAttentionStrategy");
+    g_atomspace->set_tv(h, efficiency, 0.8);
+    if (efficiency < 0.5)
+        g_atomspace->attention_decay_rate = std::min(0.05, g_atomspace->attention_decay_rate * 1.1);
+    else
+        g_atomspace->attention_decay_rate = std::max(0.005, g_atomspace->attention_decay_rate * 0.95);
+    return h;
+}
 
-void gnc_account_set_cognitive_type(Account *account, GncCognitiveAccountType cognitive_type)
+/* ------------------------------------------------------------------ */
+/* Cognitive account types                                            */
+/* ------------------------------------------------------------------ */
+
+void
+gnc_account_set_cognitive_type(Account *account, GncCognitiveAccountType cognitive_type)
 {
     g_return_if_fail(account != nullptr);
-    
-    // Store cognitive type in account KVP
-    qof_instance_set_kvp(QOF_INSTANCE(account), 
-                        g_variant_new_uint32(cognitive_type),
-                        1, COGNITIVE_TYPE_KEY);
-    
-    // Initialize cognitive behaviors based on type
-    if (g_atomspace) {
-        GncAtomHandle atom_handle = gnc_account_to_atomspace(account);
-        if (atom_handle != 0) {
-            auto& params = g_atomspace->attention_params[atom_handle];
-            
-            // Configure attention parameters based on cognitive type
-            switch (cognitive_type) {
-                case GNC_COGNITIVE_ACCT_ADAPTIVE:
-                    params.wage *= 1.2; // Higher wage for adaptive learning
-                    params.activity_level += 0.1; // Boost initial activity
-                    params.lti += 10.0; // Build long-term importance
-                    break;
-                    
-                case GNC_COGNITIVE_ACCT_PREDICTIVE:
-                    params.sti += 25.0; // Higher short-term attention for predictions
-                    params.confidence += 0.1; // Boost confidence for predictive accounts
-                    break;
-                    
-                case GNC_COGNITIVE_ACCT_MULTIMODAL:
-                    params.wage *= 1.5; // Higher cognitive wages for complex processing
-                    params.rent *= 1.3; // Higher maintenance cost
-                    params.vlti += 1.0; // Very long-term importance
-                    break;
-                    
-                case GNC_COGNITIVE_ACCT_ATTENTION:
-                    params.sti += 50.0; // Maximum attention allocation
-                    params.lti += 25.0;
-                    params.activity_level += 0.3;
-                    break;
-                    
-                case GNC_COGNITIVE_ACCT_TRADITIONAL:
-                default:
-                    // Keep default parameters
-                    break;
-            }
-            
-            // Create cognitive type atom for pattern tracking
-            std::string type_name = "CognitiveAccountType:" + 
-                                   std::string(xaccAccountGetName(account)) + ":" +
-                                   std::to_string(cognitive_type);
-            
-            GncAtomHandle type_atom = g_atomspace->create_atom(GNC_ATOM_CONCEPT_NODE, type_name);
-            gnc_atomspace_set_truth_value(type_atom, 0.9, 0.8);
-        }
+    GValue v = G_VALUE_INIT;
+    g_value_init(&v, G_TYPE_INT64);
+    g_value_set_int64(&v, static_cast<gint64>(cognitive_type));
+    qof_instance_set_kvp(QOF_INSTANCE(account), &v, 1, COGNITIVE_TYPE_KEY);
+    g_value_unset(&v);
+
+    if (!g_atomspace) return;
+    GncAtomHandle h = gnc_account_to_atomspace(account);
+    auto *atom = g_atomspace->get(h);
+    if (!atom) return;
+    auto &params = atom->attention;
+    if (cognitive_type & GNC_COGNITIVE_ACCT_ADAPTIVE) {
+        params.wage *= 1.2;
+        params.activity_level += 0.1;
+        params.lti += 10.0;
     }
-    
-    g_debug("Set cognitive type %u for account %s with enhanced behaviors", 
-            cognitive_type, xaccAccountGetName(account));
+    if (cognitive_type & GNC_COGNITIVE_ACCT_PREDICTIVE) {
+        params.sti += 25.0;
+        params.confidence = clamp01(params.confidence + 0.1);
+    }
+    if (cognitive_type & GNC_COGNITIVE_ACCT_MULTIMODAL) {
+        params.wage *= 1.5;
+        params.rent *= 1.3;
+        params.vlti += 1.0;
+    }
+    if (cognitive_type & GNC_COGNITIVE_ACCT_ATTENTION) {
+        params.sti += 50.0;
+        params.lti += 25.0;
+        params.activity_level += 0.3;
+    }
+    g_atomspace->refresh_legacy_attention(params);
 }
 
-GncCognitiveAccountType gnc_account_get_cognitive_type(const Account *account)
+GncCognitiveAccountType
+gnc_account_get_cognitive_type(const Account *account)
 {
     g_return_val_if_fail(account != nullptr, GNC_COGNITIVE_ACCT_TRADITIONAL);
-    
-    // Retrieve cognitive type from account KVP
-    auto var = qof_instance_get_kvp(QOF_INSTANCE(account), 1, COGNITIVE_TYPE_KEY);
-    if (var && g_variant_is_of_type(var, G_VARIANT_TYPE_UINT32)) {
-        return static_cast<GncCognitiveAccountType>(g_variant_get_uint32(var));
-    }
-    
-    return GNC_COGNITIVE_ACCT_TRADITIONAL;
+    GValue v = G_VALUE_INIT;
+    qof_instance_get_kvp(QOF_INSTANCE(account), &v, 1, COGNITIVE_TYPE_KEY);
+    GncCognitiveAccountType t = GNC_COGNITIVE_ACCT_TRADITIONAL;
+    if (G_VALUE_HOLDS_INT64(&v))
+        t = static_cast<GncCognitiveAccountType>(g_value_get_int64(&v));
+    else if (G_VALUE_HOLDS_UINT(&v))
+        t = static_cast<GncCognitiveAccountType>(g_value_get_uint(&v));
+    else if (G_VALUE_HOLDS_INT(&v))
+        t = static_cast<GncCognitiveAccountType>(g_value_get_int(&v));
+    if (G_IS_VALUE(&v))
+        g_value_unset(&v);
+    return t;
 }
 
-// Enhanced cognitive account behavior analysis
-gboolean gnc_account_has_cognitive_behavior(const Account *account, GncCognitiveAccountType behavior)
+gboolean
+gnc_account_has_cognitive_behavior(const Account *account, GncCognitiveAccountType behavior)
 {
     g_return_val_if_fail(account != nullptr, FALSE);
-    
-    GncCognitiveAccountType current_type = gnc_account_get_cognitive_type(account);
-    
-    // Check if account has the specified cognitive behavior (bitwise)
-    return (current_type & behavior) != 0;
+    return (gnc_account_get_cognitive_type(account) & behavior) != 0;
 }
 
-// Adaptive learning behavior for cognitive accounts
-void gnc_account_adapt_cognitive_behavior(Account *account, const Transaction *transaction)
+void
+gnc_account_adapt_cognitive_behavior(Account *account, const Transaction *transaction)
 {
-    g_return_if_fail(account != nullptr);
-    g_return_if_fail(transaction != nullptr);
-    
-    GncCognitiveAccountType cognitive_type = gnc_account_get_cognitive_type(account);
-    
-    if (cognitive_type & GNC_COGNITIVE_ACCT_ADAPTIVE) {
-        // Adaptive accounts learn from transaction patterns
-        gdouble validation_score = gnc_pln_validate_double_entry(transaction);
-        
-        if (g_atomspace) {
-            GncAtomHandle atom_handle = gnc_account_to_atomspace(account);
-            if (atom_handle != 0) {
-                auto& params = g_atomspace->attention_params[atom_handle];
-                
-                // Adaptive learning: adjust parameters based on transaction success
-                if (validation_score > 0.8) {
-                    params.confidence = std::min(1.0, params.confidence + 0.01);
-                    params.lti += 1.0; // Build long-term knowledge
-                } else if (validation_score < 0.3) {
-                    params.confidence *= 0.99; // Slight confidence reduction
-                    params.sti += 5.0; // Increase attention for problematic patterns
-                }
-                
-                // Update activity level based on learning
-                params.activity_level = (params.activity_level * 0.9) + (validation_score * 0.1);
-            }
-        }
-        
-        g_debug("Adaptive account %s learned from transaction (validation: %.3f)", 
-                xaccAccountGetName(account), validation_score);
+    g_return_if_fail(account && transaction);
+    if (!(gnc_account_get_cognitive_type(account) & GNC_COGNITIVE_ACCT_ADAPTIVE))
+        return;
+    gdouble score = gnc_pln_validate_double_entry(transaction);
+    if (!g_atomspace) return;
+    GncAtomHandle h = gnc_account_to_atomspace(account);
+    auto *atom = g_atomspace->get(h);
+    if (!atom) return;
+    auto &params = atom->attention;
+    if (score > 0.8) {
+        params.confidence = std::min(1.0, params.confidence + 0.01);
+        params.lti += 1.0;
+    } else if (score < 0.3) {
+        params.confidence *= 0.99;
+        params.sti += 5.0;
     }
+    params.activity_level = params.activity_level * 0.9 + score * 0.1;
+    g_atomspace->refresh_legacy_attention(params);
+}
+
+/* ------------------------------------------------------------------ */
+/* Book observation / commit hook                                     */
+/* ------------------------------------------------------------------ */
+
+void
+gnc_cognitive_accounting_observe_book(QofBook *book)
+{
+    g_return_if_fail(book != nullptr);
+    if (!g_atomspace) return;
+    Account *root = gnc_book_get_root_account(book);
+    if (!root) return;
+    GList *accts = gnc_account_get_descendants_sorted(root);
+    for (GList *n = accts; n; n = n->next)
+        gnc_account_to_atomspace(GNC_ACCOUNT(n->data));
+    g_list_free(accts);
+}
+
+void
+gnc_cognitive_accounting_on_transaction_commit(Transaction *transaction)
+{
+    g_return_if_fail(transaction != nullptr);
+    if (!g_atomspace) return;
+
+    gnc_transaction_to_atomspace(transaction);
+    gdouble score = gnc_pln_validate_double_entry(transaction);
+
+    GList *splits = xaccTransGetSplitList(transaction);
+    for (GList *n = splits; n; n = n->next) {
+        Account *acc = xaccSplitGetAccount(GNC_SPLIT(n->data));
+        if (!acc) continue;
+        gnc_ecan_update_account_attention(acc, transaction);
+        gnc_account_adapt_cognitive_behavior(acc, transaction);
+    }
+
+    /* Notify module hub with typed atom payload */
+    GncCognitiveAtomMessage msg{};
+    msg.source_module = "PLN";
+    msg.target_module = "ECAN";
+    msg.message_type = "ValidationResult";
+    msg.payload_atom = g_atomspace->transaction_atoms.count(transaction)
+        ? g_atomspace->transaction_atoms[transaction] : 0;
+    msg.priority = score;
+    msg.timestamp = gnc_time(nullptr);
+    gnc_send_cognitive_message(&msg);
+
+    gnc_cognitive_send_message(GNC_MODULE_PLN, GNC_MODULE_ECAN,
+                               GNC_MSG_DATA_UPDATE, GUINT_TO_POINTER((guint)(score * 1000)));
+}
+
+/* ------------------------------------------------------------------ */
+/* AtomSpace stats                                                    */
+/* ------------------------------------------------------------------ */
+
+gboolean
+gnc_cognitive_atomspace_stats(guint64 *atom_count,
+                              guint64 *account_atoms,
+                              guint64 *transaction_atoms,
+                              gdouble *sti_funds,
+                              gdouble *lti_funds)
+{
+    if (!g_atomspace)
+        return FALSE;
+    if (atom_count)
+        *atom_count = static_cast<guint64>(g_atomspace->atoms.size());
+    if (account_atoms)
+        *account_atoms = static_cast<guint64>(g_atomspace->account_atoms.size());
+    if (transaction_atoms)
+        *transaction_atoms = static_cast<guint64>(g_atomspace->transaction_atoms.size());
+    if (sti_funds)
+        *sti_funds = g_atomspace->total_sti_funds;
+    if (lti_funds)
+        *lti_funds = g_atomspace->total_lti_funds;
+    return TRUE;
+}
+
+/* ------------------------------------------------------------------ */
+/* UI badges / attention heat                                         */
+/* ------------------------------------------------------------------ */
+
+static gboolean g_ui_badges_enabled = FALSE;
+
+void
+gnc_cognitive_ui_set_badges_enabled(gboolean enabled)
+{
+    g_ui_badges_enabled = enabled ? TRUE : FALSE;
+}
+
+gboolean
+gnc_cognitive_ui_badges_enabled(void)
+{
+    return g_ui_badges_enabled;
+}
+
+GncCognitiveBadge
+gnc_cognitive_transaction_badge(const Transaction *transaction)
+{
+    if (!transaction)
+        return GNC_COGNITIVE_BADGE_UNKNOWN;
+    if (!g_atomspace)
+        return GNC_COGNITIVE_BADGE_UNKNOWN;
+
+    GncTruthValue tv{};
+    if (!gnc_pln_validate_double_entry_tv(transaction, &tv))
+        return GNC_COGNITIVE_BADGE_UNKNOWN;
+
+    gdouble score = tv.strength * tv.confidence;
+    if (!xaccTransIsBalanced(transaction) || score < 0.45)
+        return GNC_COGNITIVE_BADGE_FAIL;
+    if (score < 0.70 || tv.confidence < 0.55)
+        return GNC_COGNITIVE_BADGE_WARN;
+    return GNC_COGNITIVE_BADGE_OK;
+}
+
+char*
+gnc_cognitive_transaction_badge_label(const Transaction *transaction)
+{
+    switch (gnc_cognitive_transaction_badge(transaction)) {
+    case GNC_COGNITIVE_BADGE_OK: return g_strdup("OK");
+    case GNC_COGNITIVE_BADGE_WARN: return g_strdup("Warn");
+    case GNC_COGNITIVE_BADGE_FAIL: return g_strdup("Fail");
+    case GNC_COGNITIVE_BADGE_UNKNOWN:
+    default: return g_strdup("?");
+    }
+}
+
+gdouble
+gnc_ecan_account_sti(const Account *account)
+{
+    return gnc_ecan_get_attention_params(account).sti;
+}
+
+gdouble
+gnc_ecan_account_lti(const Account *account)
+{
+    return gnc_ecan_get_attention_params(account).lti;
+}
+
+gdouble
+gnc_cognitive_account_attention_heat(const Account *account)
+{
+    if (!account || !g_atomspace)
+        return 0.0;
+    GncAttentionParams p = gnc_ecan_get_attention_params(account);
+    /* Soft-max style blend of STI and LTI into [0,1]. */
+    gdouble raw = 0.7 * p.sti + 0.3 * p.lti;
+    gdouble heat = 1.0 - std::exp(-raw / 80.0);
+    if (heat < 0.0) return 0.0;
+    if (heat > 1.0) return 1.0;
+    return heat;
+}
+
+char*
+gnc_cognitive_account_attention_css_color(const Account *account)
+{
+    gdouble h = gnc_cognitive_account_attention_heat(account);
+    /* Cool blue (low) -> hot amber (high) */
+    int r = static_cast<int>(40 + h * 200);
+    int g = static_cast<int>(80 + h * 100);
+    int b = static_cast<int>(200 - h * 160);
+    r = std::max(0, std::min(255, r));
+    g = std::max(0, std::min(255, g));
+    b = std::max(0, std::min(255, b));
+    return g_strdup_printf("#%02x%02x%02x", r, g, b);
+}
+
+gboolean
+gnc_pln_trial_balance_balanced(const Account *root_account)
+{
+    GncProofReport report{};
+    if (!gnc_pln_trial_balance_report(root_account, &report))
+        return FALSE;
+    return report.balanced;
+}
+
+/* ------------------------------------------------------------------ */
+/* HTML fragments for reports                                         */
+/* ------------------------------------------------------------------ */
+
+static void
+html_escape_append(std::ostringstream& ss, const char *text)
+{
+    if (!text) return;
+    for (const char *p = text; *p; ++p) {
+        switch (*p) {
+        case '&': ss << "&amp;"; break;
+        case '<': ss << "&lt;"; break;
+        case '>': ss << "&gt;"; break;
+        case '"': ss << "&quot;"; break;
+        default: ss << *p; break;
+        }
+    }
+}
+
+char*
+gnc_cognitive_html_summary_for_book(QofBook *book)
+{
+    std::ostringstream ss;
+    ss << "<div class=\"gnc-cognitive-summary\">";
+    if (!gnc_cognitive_accounting_is_initialized()) {
+        ss << "<p>Cognitive accounting is not initialized.</p></div>";
+        return g_strdup(ss.str().c_str());
+    }
+
+    if (book)
+        gnc_cognitive_backend_sync_book(book);
+
+    char *status = gnc_cognitive_backend_status_json();
+    ss << "<p><b>Backend:</b> ";
+    html_escape_append(ss, gnc_cognitive_backend_name());
+    ss << " &nbsp; <b>Health:</b> "
+       << (gnc_cognitive_backend_health_check() ? "OK" : "DEGRADED")
+       << "</p>";
+    ss << "<pre class=\"gnc-cognitive-status\">";
+    html_escape_append(ss, status ? status : "{}");
+    ss << "</pre></div>";
+    g_free(status);
+    return g_strdup(ss.str().c_str());
+}
+
+char*
+gnc_cognitive_attention_table_html(QofBook *book, gint top_n)
+{
+    if (top_n <= 0)
+        top_n = 10;
+    if (top_n > 100)
+        top_n = 100;
+
+    std::ostringstream ss;
+    ss << "<table class=\"gnc-cognitive-attention\">"
+       << "<thead><tr><th>Account</th><th>STI</th><th>LTI</th>"
+       << "<th>Heat</th><th>Color</th></tr></thead><tbody>";
+
+    if (!gnc_cognitive_accounting_is_initialized()) {
+        ss << "<tr><td colspan=\"5\">Cognitive accounting not initialized.</td></tr>"
+           << "</tbody></table>";
+        return g_strdup(ss.str().c_str());
+    }
+
+    if (book)
+        gnc_cognitive_accounting_observe_book(book);
+
+    std::vector<Account*> buf(static_cast<size_t>(top_n), nullptr);
+    gint n = gnc_ecan_top_accounts(buf.data(), top_n);
+    for (gint i = 0; i < n; ++i) {
+        Account *acc = buf[static_cast<size_t>(i)];
+        if (!acc) continue;
+        const char *name = xaccAccountGetName(acc);
+        GncAttentionParams p = gnc_ecan_get_attention_params(acc);
+        gdouble heat = gnc_cognitive_account_attention_heat(acc);
+        char *color = gnc_cognitive_account_attention_css_color(acc);
+        ss << "<tr><td>";
+        html_escape_append(ss, name ? name : "(unnamed)");
+        ss << "</td><td>" << p.sti << "</td><td>" << p.lti
+           << "</td><td>" << heat
+           << "</td><td style=\"background:" << (color ? color : "#ccc")
+           << "\">&nbsp;&nbsp;&nbsp;</td></tr>";
+        g_free(color);
+    }
+    if (n == 0)
+        ss << "<tr><td colspan=\"5\">No attention-ranked accounts yet.</td></tr>";
+    ss << "</tbody></table>";
+    return g_strdup(ss.str().c_str());
+}
+
+char*
+gnc_cognitive_validation_summary_html(QofBook *book)
+{
+    std::ostringstream ss;
+    ss << "<div class=\"gnc-cognitive-validation\">";
+
+    if (!gnc_cognitive_accounting_is_initialized()) {
+        ss << "<p>Cognitive accounting not initialized.</p></div>";
+        return g_strdup(ss.str().c_str());
+    }
+
+    Account *root = book ? gnc_book_get_root_account(book) : nullptr;
+    if (root) {
+        GncProofReport report{};
+        if (gnc_pln_trial_balance_report(root, &report)) {
+            ss << "<p><b>Trial balance proof:</b> "
+               << (report.balanced ? "balanced" : "imbalanced")
+               << " (strength=" << report.strength
+               << ", confidence=" << report.confidence << ")</p>";
+        }
+    }
+
+    /* Sample recent mapped transactions for badge histogram */
+    gint ok = 0, warn = 0, fail = 0, unknown = 0, total = 0;
+    if (g_atomspace) {
+        for (const auto &kv : g_atomspace->transaction_atoms) {
+            const Transaction *tx = kv.first;
+            if (!tx) continue;
+            ++total;
+            switch (gnc_cognitive_transaction_badge(tx)) {
+            case GNC_COGNITIVE_BADGE_OK: ++ok; break;
+            case GNC_COGNITIVE_BADGE_WARN: ++warn; break;
+            case GNC_COGNITIVE_BADGE_FAIL: ++fail; break;
+            default: ++unknown; break;
+            }
+            if (total >= 500) break; /* bound work for large books */
+        }
+    }
+    ss << "<p><b>Transaction badges</b> (sample up to 500 mapped): "
+       << "OK=" << ok << ", Warn=" << warn << ", Fail=" << fail
+       << ", ?=" << unknown << ", n=" << total << "</p>";
+
+    char *moses = gnc_moses_last_strategies_json();
+    ss << "<p><b>MOSES strategies:</b></p><pre>";
+    html_escape_append(ss, moses ? moses : "[]");
+    ss << "</pre></div>";
+    g_free(moses);
+    return g_strdup(ss.str().c_str());
 }

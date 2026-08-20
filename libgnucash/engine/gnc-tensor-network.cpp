@@ -15,6 +15,9 @@
 
 #include "gnc-tensor-network.h"
 #include "gnc-cognitive-comms.h"
+#include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <math.h>
 #include <string.h>
 
@@ -219,9 +222,12 @@ gboolean gnc_tensor_data_from_transactions(GncTensorData *tensor, GList *transac
     g_message("Encoding %d transactions into tensor '%s'", 
               g_list_length(transactions), tensor->name);
     
-    // Encode transaction data into tensor format
+    /* Feature schema v1 (8 dims):
+     * 0 date, 1 amount_magnitude, 2 split_count, 3 validity,
+     * 4 log_magnitude, 5 imbalance_flag, 6 dow, 7 normalized_imbalance
+     */
     gsize tx_count = g_list_length(transactions);
-    gsize feature_dim = 8;  // Example: date, amount, account_id, etc.
+    gsize feature_dim = 8;
     
     if (tensor->total_size < tx_count * feature_dim) {
         g_warning("Tensor too small for transaction data");
@@ -231,17 +237,32 @@ gboolean gnc_tensor_data_from_transactions(GncTensorData *tensor, GList *transac
     gsize idx = 0;
     for (GList *node = transactions; node; node = node->next) {
         Transaction *tx = (Transaction*)node->data;
-        
-        // Encode transaction features
-        tensor->data[idx++] = (gfloat)xaccTransGetDate(tx);
-        tensor->data[idx++] = (gfloat)gnc_numeric_to_double(xaccTransGetImbalanceValue(tx));
-        tensor->data[idx++] = (gfloat)g_list_length(xaccTransGetSplitList(tx));
-        tensor->data[idx++] = 1.0f;  // Transaction validity
-        
-        // Pad remaining features
-        while (idx % feature_dim != 0) {
-            tensor->data[idx++] = 0.0f;
+        GList *splits = xaccTransGetSplitList(tx);
+        gint split_count = g_list_length(splits);
+        gdouble mag = 0.0;
+        for (GList *s = splits; s; s = s->next) {
+            mag += fabs(gnc_numeric_to_double(xaccSplitGetAmount(GNC_SPLIT(s->data))));
         }
+        gdouble imbalance = gnc_numeric_to_double(xaccTransGetImbalanceValue(tx));
+        time64 tdate = xaccTransGetDate(tx);
+        gfloat dow = 0.0f;
+        if (tdate > 0) {
+            GDate date;
+            g_date_clear(&date, 1);
+            g_date_set_time_t(&date, (time_t)tdate);
+            dow = (gfloat)g_date_get_weekday(&date);
+        }
+
+        tensor->data[idx++] = (gfloat)tdate;
+        /* Prefer magnitude; fall back to |imbalance| for single-sided test txs */
+        tensor->data[idx++] = (gfloat)(mag > 0.0 ? mag : fabs(imbalance));
+        tensor->data[idx++] = (gfloat)split_count;
+        /* Feature 3 "validity": successfully encoded / committed row (always 1 here) */
+        tensor->data[idx++] = 1.0f;
+        tensor->data[idx++] = (gfloat)log1p(mag > 0.0 ? mag : fabs(imbalance));
+        tensor->data[idx++] = (fabs(imbalance) < 1e-9) ? 0.0f : 1.0f;
+        tensor->data[idx++] = dow;
+        tensor->data[idx++] = (gfloat)((mag > 0.0) ? (fabs(imbalance) / mag) : fabs(imbalance));
     }
     
     return TRUE;
@@ -268,14 +289,94 @@ gboolean gnc_tensor_data_from_accounts(GncTensorData *tensor, GList *accounts)
         Account *acc = (Account*)node->data;
         
         // Encode account features
+        time64 last_reconcile = 0;
+        xaccAccountGetReconcileLastDate(acc, &last_reconcile);
         tensor->data[idx++] = (gfloat)xaccAccountGetType(acc);
         tensor->data[idx++] = (gfloat)gnc_numeric_to_double(xaccAccountGetBalance(acc));
         tensor->data[idx++] = (gfloat)gnc_account_get_current_depth(acc);
         tensor->data[idx++] = (gfloat)gnc_account_n_children(acc);
-        tensor->data[idx++] = xaccAccountGetReconcileLastDate(acc);
+        tensor->data[idx++] = (gfloat)last_reconcile;
         tensor->data[idx++] = 1.0f;  // Account validity
     }
     
+    return TRUE;
+}
+
+/* Simple k-means over row-major feature vectors.
+ * input shape preferred [n_rows, n_cols]; falls back to flat length.
+ * output[i] = cluster id for row i (repeated across feature dim if needed).
+ */
+static gboolean
+gnc_tensor_kmeans(GncTensorData *input, GncTensorData *output, gint k, gint max_iter)
+{
+    if (!input || !output || !input->data || !output->data) return FALSE;
+    if (k < 1) k = 1;
+    if (max_iter < 1) max_iter = 10;
+
+    gsize n_cols = (input->n_dims >= 2) ? input->shape[1] : 1;
+    if (n_cols == 0) n_cols = 1;
+    gsize n_rows = input->total_size / n_cols;
+    if (n_rows == 0) return FALSE;
+    if ((gsize)k > n_rows) k = (gint)n_rows;
+
+    gfloat *centroids = g_new0(gfloat, (gsize)k * n_cols);
+    gint *assign = g_new0(gint, n_rows);
+
+    /* Init centroids to first k rows */
+    for (gint c = 0; c < k; c++) {
+        for (gsize j = 0; j < n_cols; j++)
+            centroids[c * n_cols + j] = input->data[c * n_cols + j];
+    }
+
+    for (gint iter = 0; iter < max_iter; iter++) {
+        gboolean changed = FALSE;
+        for (gsize i = 0; i < n_rows; i++) {
+            gfloat best = G_MAXFLOAT;
+            gint best_c = 0;
+            for (gint c = 0; c < k; c++) {
+                gfloat dist = 0.0f;
+                for (gsize j = 0; j < n_cols; j++) {
+                    gfloat d = input->data[i * n_cols + j] - centroids[c * n_cols + j];
+                    dist += d * d;
+                }
+                if (dist < best) {
+                    best = dist;
+                    best_c = c;
+                }
+            }
+            if (assign[i] != best_c) {
+                assign[i] = best_c;
+                changed = TRUE;
+            }
+        }
+
+        /* Recompute centroids */
+        gfloat *sums = g_new0(gfloat, (gsize)k * n_cols);
+        gint *counts = g_new0(gint, k);
+        for (gsize i = 0; i < n_rows; i++) {
+            gint c = assign[i];
+            counts[c]++;
+            for (gsize j = 0; j < n_cols; j++)
+                sums[c * n_cols + j] += input->data[i * n_cols + j];
+        }
+        for (gint c = 0; c < k; c++) {
+            if (counts[c] == 0) continue;
+            for (gsize j = 0; j < n_cols; j++)
+                centroids[c * n_cols + j] = sums[c * n_cols + j] / (gfloat)counts[c];
+        }
+        g_free(sums);
+        g_free(counts);
+        if (!changed) break;
+    }
+
+    for (gsize i = 0; i < output->total_size; i++) {
+        gsize row = (n_rows > 0) ? (i % n_rows) : 0;
+        if (row >= n_rows) row = n_rows - 1;
+        output->data[i] = (gfloat)assign[row];
+    }
+
+    g_free(centroids);
+    g_free(assign);
     return TRUE;
 }
 
@@ -286,14 +387,9 @@ gboolean gnc_tensor_data_apply_clustering(GncTensorData *input, GncTensorData *o
     
     g_message("Applying %s clustering to tensor '%s'", clustering_algorithm, input->name);
     
-    // Simplified clustering implementation
     if (g_strcmp0(clustering_algorithm, "kmeans") == 0) {
-        // Basic K-means clustering simulation
-        for (gsize i = 0; i < output->total_size; i++) {
-            output->data[i] = fmodf(input->data[i % input->total_size], 3.0f);
-        }
+        return gnc_tensor_kmeans(input, output, 3, 15);
     } else if (g_strcmp0(clustering_algorithm, "cogfluence") == 0) {
-        // Cogfluence clustering paradigm
         return gnc_cogfluence_cluster_transactions(input, output, "enhanced");
     }
     
@@ -329,6 +425,7 @@ gboolean gnc_tensor_node_memory_process(GncTensorNode *node, GncTensorData *inpu
 gboolean gnc_tensor_node_task_process(GncTensorNode *node, GncTensorData *input)
 {
     if (!node || node->type != GNC_TENSOR_NODE_TASK) return FALSE;
+    (void)input;
     
     g_message("Task node %s orchestrating workflow", node->node_id);
     
@@ -350,12 +447,15 @@ gboolean gnc_tensor_node_task_process(GncTensorNode *node, GncTensorData *input)
 
 gboolean gnc_tensor_node_ai_process(GncTensorNode *node, GncTensorData *input)
 {
-    if (!node || node->type != GNC_TENSOR_NODE_AI) return FALSE;
+    if (!node || node->type != GNC_TENSOR_NODE_AI || !input) return FALSE;
     
     g_message("AI node %s performing pattern recognition", node->node_id);
     
     // AI node: Financial pattern recognition, clustering
-    gsize shape[] = {input->total_size / 4, 4};  // Cluster output
+    gsize n_rows = (input->n_dims >= 2 && input->shape[1] > 0)
+        ? input->total_size / input->shape[1] : input->total_size;
+    if (n_rows == 0) n_rows = 1;
+    gsize shape[] = {n_rows, 1};  // Cluster id per row
     if (!node->output_tensor) {
         node->output_tensor = gnc_tensor_data_create("ai_clusters", 2, shape);
     }
@@ -370,6 +470,7 @@ gboolean gnc_tensor_node_ai_process(GncTensorNode *node, GncTensorData *input)
 gboolean gnc_tensor_node_autonomy_process(GncTensorNode *node, GncTensorData *input)
 {
     if (!node || node->type != GNC_TENSOR_NODE_AUTONOMY) return FALSE;
+    (void)input;
     
     g_message("Autonomy node %s performing self-modification", node->node_id);
     
@@ -426,23 +527,29 @@ gboolean gnc_tensor_network_process_messages(GncTensorNetwork *network)
         GncTensorMessage *msg = (GncTensorMessage*)g_queue_pop_head(network->message_queue);
         
         GncTensorNode *target = gnc_tensor_network_get_node(network, msg->target_node_id);
-        if (target && msg->payload) {
-            // Process message based on target node type
+        if (target) {
+            /* Memory/AI need payloads; task/autonomy can run control-only messages. */
+            gboolean handled = FALSE;
             switch (target->type) {
                 case GNC_TENSOR_NODE_MEMORY:
-                    gnc_tensor_node_memory_process(target, msg->payload);
+                    if (msg->payload)
+                        handled = gnc_tensor_node_memory_process(target, msg->payload);
                     break;
                 case GNC_TENSOR_NODE_TASK:
-                    gnc_tensor_node_task_process(target, msg->payload);
+                    handled = gnc_tensor_node_task_process(target, msg->payload);
                     break;
                 case GNC_TENSOR_NODE_AI:
-                    gnc_tensor_node_ai_process(target, msg->payload);
+                    if (msg->payload)
+                        handled = gnc_tensor_node_ai_process(target, msg->payload);
+                    else if (target->input_tensor)
+                        handled = gnc_tensor_node_ai_process(target, target->input_tensor);
                     break;
                 case GNC_TENSOR_NODE_AUTONOMY:
-                    gnc_tensor_node_autonomy_process(target, msg->payload);
+                    handled = gnc_tensor_node_autonomy_process(target, msg->payload);
                     break;
             }
-            messages_processed++;
+            if (handled)
+                messages_processed++;
         }
         
         // Clean up message
@@ -573,21 +680,18 @@ gboolean gnc_cogfluence_cluster_transactions(GncTensorData *transaction_tensor,
     
     g_message("Applying Cogfluence clustering method: %s", clustering_method);
     
-    // Cogfluence clustering paradigm implementation
-    if (g_strcmp0(clustering_method, "enhanced") == 0) {
-        // Enhanced financial clustering with cognitive patterns
-        for (gsize i = 0; i < cluster_output->total_size; i++) {
-            gfloat input_val = transaction_tensor->data[i % transaction_tensor->total_size];
-            
-            // Apply cognitive clustering transformation
-            gfloat cluster_val = sinf(input_val * 0.1f) * cosf(input_val * 0.05f);
-            cluster_val = fabs(cluster_val) * 5.0f;  // Scale to cluster range
-            
-            cluster_output->data[i] = cluster_val;
-        }
+    /* enhanced = k-means with k chosen from sqrt(n_rows) */
+    gsize n_cols = (transaction_tensor->n_dims >= 2) ? transaction_tensor->shape[1] : 1;
+    if (n_cols == 0) n_cols = 1;
+    gsize n_rows = transaction_tensor->total_size / n_cols;
+    gint k = (gint)floor(sqrt((double)std::max<gsize>(1, n_rows)));
+    if (k < 2) k = 2;
+    if (k > 8) k = 8;
+    if (g_strcmp0(clustering_method, "enhanced") != 0 &&
+        g_strcmp0(clustering_method, "kmeans") != 0) {
+        k = 3;
     }
-    
-    return TRUE;
+    return gnc_tensor_kmeans(transaction_tensor, cluster_output, k, 20);
 }
 
 gboolean gnc_cogfluence_discover_patterns(GncTensorData *input_tensor,
@@ -598,16 +702,22 @@ gboolean gnc_cogfluence_discover_patterns(GncTensorData *input_tensor,
     
     g_message("Discovering emergent patterns with threshold: %f", pattern_threshold);
     
-    // Pattern discovery algorithm
+    /* Z-score style anomaly flags relative to mean/stdev */
+    gdouble sum = 0.0, sumsq = 0.0;
+    for (gsize i = 0; i < input_tensor->total_size; i++) {
+        sum += input_tensor->data[i];
+        sumsq += input_tensor->data[i] * input_tensor->data[i];
+    }
+    gdouble mean = sum / std::max<gsize>(1, input_tensor->total_size);
+    gdouble var = sumsq / std::max<gsize>(1, input_tensor->total_size) - mean * mean;
+    if (var < 0.0) var = 0.0;
+    gdouble stdev = sqrt(var);
+    if (stdev < 1e-9) stdev = 1.0;
+
     for (gsize i = 0; i < pattern_output->total_size; i++) {
         gfloat input_val = input_tensor->data[i % input_tensor->total_size];
-        
-        // Detect emergent patterns
-        if (fabs(input_val) > pattern_threshold) {
-            pattern_output->data[i] = input_val;
-        } else {
-            pattern_output->data[i] = 0.0f;
-        }
+        gdouble z = fabs((input_val - mean) / stdev);
+        pattern_output->data[i] = (z > pattern_threshold) ? (gfloat)z : 0.0f;
     }
     
     return TRUE;
@@ -620,22 +730,29 @@ gboolean gnc_cogfluence_generate_insights(GncTensorData *cluster_data,
     
     g_message("Generating financial insights from clustered data");
     
-    // Generate insights from cluster analysis
     gdouble avg_cluster = 0.0;
     gdouble max_cluster = 0.0;
+    gint distinct = 0;
+    gboolean seen[32] = { FALSE };
     
     for (gsize i = 0; i < cluster_data->total_size; i++) {
         avg_cluster += cluster_data->data[i];
-        if (cluster_data->data[i] > max_cluster) {
+        if (cluster_data->data[i] > max_cluster)
             max_cluster = cluster_data->data[i];
+        gint id = (gint)lroundf(cluster_data->data[i]);
+        if (id >= 0 && id < 32 && !seen[id]) {
+            seen[id] = TRUE;
+            distinct++;
         }
     }
-    avg_cluster /= cluster_data->total_size;
+    if (cluster_data->total_size > 0)
+        avg_cluster /= cluster_data->total_size;
     
-    // Store insights
     g_hash_table_insert(insights, g_strdup("avg_cluster"), g_strdup_printf("%f", avg_cluster));
     g_hash_table_insert(insights, g_strdup("max_cluster"), g_strdup_printf("%f", max_cluster));
     g_hash_table_insert(insights, g_strdup("cluster_count"), g_strdup_printf("%zu", cluster_data->total_size));
+    g_hash_table_insert(insights, g_strdup("distinct_clusters"), g_strdup_printf("%d", distinct));
+    g_hash_table_insert(insights, g_strdup("schema_version"), g_strdup("1"));
     
     return TRUE;
 }
@@ -654,7 +771,8 @@ gboolean gnc_tensor_network_synchronize(GncTensorNetwork *network)
     network->network_timestamp = g_get_real_time();
     
     // Send sync message to all nodes
-    GncTensorData *sync_payload = gnc_tensor_data_create("sync", 1, (gsize[]){1});
+    gsize sync_shape[1] = {1};
+    GncTensorData *sync_payload = gnc_tensor_data_create("sync", 1, sync_shape);
     sync_payload->data[0] = (gfloat)network->network_timestamp;
     
     gnc_tensor_network_broadcast_message(network, "network", "sync", sync_payload);
@@ -691,5 +809,7 @@ gboolean gnc_tensor_network_health_check(GncTensorNetwork *network)
     
     g_message("Network health: %d/%d nodes active", active_nodes, total_nodes);
     
-    return active_nodes > 0;
+    /* Healthy when the network is marked active. Idle (zero active nodes)
+     * is allowed while the network remains structurally active. */
+    return network->network_active;
 }

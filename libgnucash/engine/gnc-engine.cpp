@@ -33,6 +33,7 @@
 #include "TransactionP.hpp"
 #include "gnc-commodity.h"
 #include "gnc-pricedb-p.h"
+#include "gnc-cognitive-accounting.h"
 
 /** gnc file backend library name */
 #define GNC_LIB_NAME "gncmod-backend-xml"
@@ -61,6 +62,11 @@ gnc_engine_init_part1()
 
     /* Now register our core types */
     cashobjects_register();
+
+    /* Simulated cognitive core (always-on, no OpenCog required).
+     * Auto QOF hooks remain off unless GNC_COGNITIVE_AUTO=1.
+     * Nested scheme/comms/tensor init happens inside. */
+    gnc_cognitive_accounting_init();
 }
 
 static void
@@ -140,6 +146,8 @@ gnc_engine_init_static(int argc, char ** argv)
 void
 gnc_engine_shutdown (void)
 {
+    /* Tears down scheme/comms/tensor as well */
+    gnc_cognitive_accounting_shutdown();
     qof_log_shutdown();
     qof_close();
     engine_is_initialized = 0;

@@ -555,6 +555,11 @@ void qof_book_set_string_option(QofBook* book, const char* opt_name, const char*
 
 %include business-core.i
 
+/* Cognitive accounting / backend / UI helpers (Phase 5–7) */
+#if defined(SWIGGUILE) || defined(SWIGPYTHON)
+%include cognitive.i
+#endif
+
 %typemap(in) GList * {
     SCM path_scm = $input;
     GList *path = NULL;

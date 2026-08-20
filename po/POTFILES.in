@@ -3,6 +3,7 @@
 bindings/guile/app-utils.scm
 bindings/guile/business-core.scm
 bindings/guile/c-interface.scm
+bindings/guile/cognitive.scm
 bindings/guile/core-utils.scm
 bindings/guile/date-utilities.scm
 bindings/guile/engine.scm
@@ -473,6 +474,7 @@ gnucash/report/reports/standard/budget.scm
 gnucash/report/reports/standard/cashflow-barchart.scm
 gnucash/report/reports/standard/cash-flow.scm
 gnucash/report/reports/standard/category-barchart.scm
+gnucash/report/reports/standard/cognitive-accounting.scm
 gnucash/report/reports/standard/customer-summary.scm
 gnucash/report/reports/standard/dashboard.scm
 gnucash/report/reports/standard/equity-statement.scm
@@ -632,6 +634,10 @@ libgnucash/engine/gnc-aqbanking-templates.cpp
 libgnucash/engine/gncBillTerm.c
 libgnucash/engine/gnc-budget.cpp
 libgnucash/engine/gncBusiness.c
+libgnucash/engine/gnc-cognitive-accounting.cpp
+libgnucash/engine/gnc-cognitive-backend.cpp
+libgnucash/engine/gnc-cognitive-comms.cpp
+libgnucash/engine/gnc-cognitive-scheme.cpp
 libgnucash/engine/gnc-commodity.cpp
 libgnucash/engine/gnc-commodity.h
 libgnucash/engine/gncCustomer.c
@@ -660,6 +666,7 @@ libgnucash/engine/gnc-pricedb.cpp
 libgnucash/engine/gnc-rational.cpp
 libgnucash/engine/gnc-session.c
 libgnucash/engine/gncTaxTable.c
+libgnucash/engine/gnc-tensor-network.cpp
 libgnucash/engine/gnc-timezone.cpp
 libgnucash/engine/gnc-uri-utils.c
 libgnucash/engine/gncVendor.c
